@@ -1,0 +1,334 @@
+# -*- coding: utf-8 -*-
+"""
+ece.pipeline_eplus_wrapper
+=========================
+
+Wrapper functions to call the EnergyPlus pipeline from the main application
+using conda run to execute in the bim2sim environment.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional, Dict, Any
+
+from ece.utils.logging import init_logger
+
+logger = init_logger(__name__)
+
+
+def _sanitize_path_for_subprocess(path_str: str) -> str:
+    """
+    Sanitize file paths to avoid Unicode issues in subprocess calls.
+    
+    Parameters
+    ----------
+    path_str : str
+        Original path string
+        
+    Returns
+    -------
+    str
+        Sanitized path string safe for subprocess
+    """
+    # Replace Unicode replacement character (U+FFFD) which might cause "ffd" errors
+    sanitized = path_str.replace('\ufffd', '?')
+    
+    # Replace other problematic Unicode characters
+    sanitized = sanitized.encode('ascii', errors='replace').decode('ascii')
+    
+    return sanitized
+
+
+def run_eplus_simulation_async(
+    ifc_file_path: Path,
+    weather_file_path: Path,
+    sensor_id: str,
+    project_base_dir: Optional[Path] = None,
+    ep_install_path: str = 'C://EnergyPlusV9-4-0/',
+    conda_env_name: str = 'bim2sim'
+) -> Dict[str, Any]:
+    """
+    Run EnergyPlus simulation asynchronously using conda run.
+    
+    This function calls the pipeline_eplus.py script in the bim2sim conda
+    environment and returns the results.
+    
+    Parameters
+    ----------
+    ifc_file_path : Path
+        Path to IFC building model file
+    weather_file_path : Path
+        Path to EPW weather file
+    sensor_id : str
+        Sensor identifier for organizing simulation results
+    project_base_dir : Optional[Path]
+        Base directory for simulation project
+    ep_install_path : str
+        Path to EnergyPlus installation directory
+    conda_env_name : str
+        Name of the conda environment containing bim2sim
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing simulation results and status
+    """
+    # Convert paths to absolute paths and sanitize for subprocess
+    ifc_file_path = Path(ifc_file_path).resolve()
+    weather_file_path = Path(weather_file_path).resolve()
+    
+    # Sanitize paths to prevent Unicode issues
+    ifc_path_sanitized = _sanitize_path_for_subprocess(str(ifc_file_path))
+    weather_path_sanitized = _sanitize_path_for_subprocess(str(weather_file_path))
+    sensor_id_sanitized = _sanitize_path_for_subprocess(sensor_id)
+    
+    logger.info(f"Original paths:")
+    logger.info(f"  IFC: {ifc_file_path}")
+    logger.info(f"  Weather: {weather_file_path}")
+    logger.info(f"  Sensor: {sensor_id}")
+    
+    if str(ifc_file_path) != ifc_path_sanitized:
+        logger.warning(f"IFC path sanitized: {ifc_path_sanitized}")
+    if str(weather_file_path) != weather_path_sanitized:
+        logger.warning(f"Weather path sanitized: {weather_path_sanitized}")
+    if sensor_id != sensor_id_sanitized:
+        logger.warning(f"Sensor ID sanitized: {sensor_id_sanitized}")
+    
+    # Get the pipeline script path
+    pipeline_script = Path(__file__).parent / "pipeline_eplus.py"
+    pipeline_script = pipeline_script.resolve()  # Get absolute path
+    
+    # Build the conda run command with proper output capture
+    # Ensure all paths are properly quoted and encoded
+    cmd = [
+        "conda", "run", 
+        "-n", conda_env_name,
+        "python", str(pipeline_script),
+        "--ifc", ifc_path_sanitized,
+        "--weather", weather_path_sanitized,
+        "--sensor", sensor_id_sanitized,
+        "--ep-path", ep_install_path
+    ]
+    
+    # Add project directory if specified
+    if project_base_dir:
+        project_dir_sanitized = _sanitize_path_for_subprocess(str(Path(project_base_dir).resolve()))
+        cmd.extend(["--project-dir", project_dir_sanitized])
+    
+    logger.info(f"Running EnergyPlus simulation for sensor {sensor_id}")
+    logger.info(f"IFC file: {ifc_file_path}")
+    logger.info(f"Weather file: {weather_file_path}")
+    logger.info(f"Command: {' '.join(cmd)}")
+    
+    # Log command arguments separately for Unicode debugging
+    logger.info("Command arguments for Unicode debugging:")
+    for i, arg in enumerate(cmd):
+        try:
+            arg_ascii = arg.encode('ascii', errors='replace').decode('ascii')
+            logger.info(f"  [{i}] {arg} (ASCII: {arg_ascii})")
+        except Exception as e:
+            logger.warning(f"  [{i}] {arg} (encoding issue: {e})")
+    
+    try:
+        # Run the subprocess with real-time output capture
+        logger.info("Starting EnergyPlus simulation subprocess...")
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',  # Replace problematic Unicode characters
+            timeout=3600,  # 1 hour timeout
+            cwd=Path(__file__).parent.parent,  # Run from project root
+            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}  # Force UTF-8 encoding for Python subprocess
+        )
+        
+        # Log all subprocess output for debugging
+        logger.info(f"Process return code: {result.returncode}")
+        
+        # Log stdout (this contains bim2sim logs)
+        if result.stdout:
+            logger.info("=== SUBPROCESS STDOUT (includes bim2sim logs) ===")
+            for i, line in enumerate(result.stdout.split('\n')):
+                if line.strip():  # Only log non-empty lines
+                    logger.info(f"STDOUT[{i:03d}]: {line}")
+            logger.info("=== END SUBPROCESS STDOUT ===")
+        
+        # Log stderr (this contains error messages)
+        if result.stderr:
+            logger.info("=== SUBPROCESS STDERR ===")
+            for i, line in enumerate(result.stderr.split('\n')):
+                if line.strip():  # Only log non-empty lines
+                    logger.error(f"STDERR[{i:03d}]: {line}")
+            logger.info("=== END SUBPROCESS STDERR ===")
+        
+        # Parse the JSON output from the simulation
+        output_lines = result.stdout.strip().split('\n')
+        error_lines = result.stderr.strip().split('\n') if result.stderr else []
+        
+        json_start = -1
+        
+        # Find the start of JSON output
+        for i, line in enumerate(output_lines):
+            if line.strip().startswith('{'):
+                json_start = i
+                break
+        
+        if json_start >= 0:
+            json_output = '\n'.join(output_lines[json_start:])
+            try:
+                simulation_results = json.loads(json_output)
+            except json.JSONDecodeError:
+                simulation_results = {
+                    "success": False,
+                    "error": "Failed to parse simulation results",
+                    "raw_output": result.stdout
+                }
+        else:
+            simulation_results = {
+                "success": False,
+                "error": "No JSON output found",
+                "raw_output": result.stdout
+            }
+        
+        # Add process information
+        simulation_results.update({
+            "process_returncode": result.returncode,
+            "process_stdout": result.stdout,
+            "process_stderr": result.stderr
+        })
+        
+        if result.returncode != 0:
+            simulation_results["success"] = False
+            error_msg = result.stderr or "Process failed with no stderr output"
+            
+            # Check for specific bim2sim import error
+            if "bim2sim not available" in error_msg:
+                error_msg += "\n\nTroubleshooting steps:"
+                error_msg += "\n1. Verify bim2sim environment exists: conda env list"
+                error_msg += "\n2. Test bim2sim import: conda run -n bim2sim python -c 'import bim2sim'"
+                error_msg += f"\n3. Check conda path: {cmd[0]}"
+            
+            if "error" not in simulation_results:
+                simulation_results["error"] = f"Process failed with return code {result.returncode}: {error_msg}"
+        
+        logger.info(f"Simulation completed with return code: {result.returncode}")
+        
+        return simulation_results
+        
+    except subprocess.TimeoutExpired:
+        error_msg = "Simulation timed out after 1 hour"
+        logger.error(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "message": "Simulation timed out"
+        }
+        
+    except Exception as e:
+        error_msg = f"Failed to run simulation: {str(e)}"
+        logger.error(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "message": "Pipeline execution failed"
+        }
+
+
+def test_bim2sim_environment(conda_env_name: str = 'bim2sim') -> bool:
+    """
+    Test if the bim2sim conda environment is available and working.
+    
+    Parameters
+    ----------
+    conda_env_name : str
+        Name of the conda environment to test
+        
+    Returns
+    -------
+    bool
+        True if environment is available and bim2sim can be imported
+    """
+    try:
+        cmd = [
+            "conda", "run", 
+            "-n", conda_env_name,
+            "python", "-c", "import bim2sim; print('bim2sim available')"
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',  # Replace problematic Unicode characters
+            timeout=30
+        )
+        
+        return result.returncode == 0 and "bim2sim available" in result.stdout
+        
+    except Exception as e:
+        logger.warning(f"Failed to test bim2sim environment: {e}")
+        return False
+
+
+def get_simulation_status(project_path: Path) -> Dict[str, Any]:
+    """
+    Check the status of a simulation project.
+    
+    Parameters
+    ----------
+    project_path : Path
+        Path to the simulation project directory
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing simulation status information
+    """
+    project_path = Path(project_path)
+    
+    status = {
+        "project_exists": project_path.exists(),
+        "project_path": str(project_path)
+    }
+    
+    if project_path.exists():
+        # Check for common EnergyPlus output files
+        output_files = {
+            "idf_file": list(project_path.glob("**/*.idf")),
+            "epw_file": list(project_path.glob("**/*.epw")),
+            "csv_results": list(project_path.glob("**/*.csv")),
+            "html_results": list(project_path.glob("**/*.html")),
+            "err_files": list(project_path.glob("**/*.err"))
+        }
+        
+        status["output_files"] = {
+            key: [str(f) for f in files] 
+            for key, files in output_files.items()
+        }
+        
+        # Check if simulation completed successfully
+        err_files = output_files["err_files"]
+        if err_files:
+            # Check the last error file for completion status
+            latest_err = max(err_files, key=lambda x: x.stat().st_mtime)
+            try:
+                with open(latest_err, 'r') as f:
+                    err_content = f.read()
+                    status["simulation_complete"] = "EnergyPlus Completed Successfully" in err_content
+                    status["has_errors"] = "** Severe **" in err_content or "** Fatal **" in err_content
+            except Exception:
+                status["simulation_complete"] = False
+                status["has_errors"] = True
+        else:
+            status["simulation_complete"] = False
+            status["has_errors"] = False
+    
+    return status
