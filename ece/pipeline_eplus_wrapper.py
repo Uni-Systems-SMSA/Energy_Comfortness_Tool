@@ -224,7 +224,7 @@ def run_eplus_simulation_async(
         
     except subprocess.TimeoutExpired:
         error_msg = "Simulation timed out after 1 hour"
-        logger.error(error_msg)
+        logger.exception(error_msg)
         return {
             "success": False,
             "error": error_msg,
@@ -233,7 +233,7 @@ def run_eplus_simulation_async(
         
     except Exception as e:
         error_msg = f"Failed to run simulation: {str(e)}"
-        logger.error(error_msg)
+        logger.exception(error_msg)
         return {
             "success": False,
             "error": error_msg,
@@ -332,3 +332,115 @@ def get_simulation_status(project_path: Path) -> Dict[str, Any]:
             status["has_errors"] = False
     
     return status
+
+
+def run_user_request(
+    ifc_file_path: Path,
+    weather_file_path: Path,
+    sensor_id: str,
+    start_date: str,
+    end_date: str,
+    project_base_dir: Optional[Path] = None,
+    ep_install_path: str = 'C://EnergyPlusV9-4-0/',
+    conda_env_name: str = 'bim2sim'
+) -> Dict[str, Any]:
+    """
+    Run user request with automatic cross-year split-run support.
+    
+    This is the main facade function that determines whether to run a single 
+    simulation or split across multiple years based on the date range.
+    
+    Parameters
+    ----------
+    ifc_file_path : Path
+        Path to IFC building model file
+    weather_file_path : Path
+        Path to EPW weather file
+    sensor_id : str
+        Sensor identifier for organizing simulation results
+    start_date : str
+        Start date in format 'YYYY-MM-DD'
+    end_date : str
+        End date in format 'YYYY-MM-DD'
+    project_base_dir : Optional[Path]
+        Base directory for simulation project
+    ep_install_path : str
+        Path to EnergyPlus installation directory
+    conda_env_name : str
+        Name of the conda environment containing bim2sim
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing simulation results and status
+    """
+    from datetime import datetime
+    from ece.utils.split_run import process_cross_year
+    
+    logger.info(f"Processing user request for sensor {sensor_id}")
+    logger.info(f"Date range: {start_date} to {end_date}")
+    
+    try:
+        # Parse dates to determine if cross-year split is needed
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        
+        # Check if simulation spans multiple years
+        if start_dt.year != end_dt.year:
+            logger.info(f"Cross-year simulation detected ({start_dt.year} to {end_dt.year})")
+            logger.info("Using split-run approach with EnergyPlus year normalization")
+            
+            # Use split-run functionality
+            return process_cross_year(
+                ifc_file_path=ifc_file_path,
+                weather_file_path=weather_file_path,
+                sensor_id=sensor_id,
+                start_date=start_date,
+                end_date=end_date,
+                project_base_dir=project_base_dir,
+                ep_install_path=ep_install_path,
+                conda_env_name=conda_env_name,
+                eplus_wrapper_func=run_eplus_simulation_async
+            )
+        else:
+            logger.info(f"Single-year simulation for {start_dt.year}")
+            logger.info("Using standard EnergyPlus pipeline")
+            
+            # Use existing single-year simulation
+            result = run_eplus_simulation_async(
+                ifc_file_path=ifc_file_path,
+                weather_file_path=weather_file_path,
+                sensor_id=sensor_id,
+                project_base_dir=project_base_dir,
+                ep_install_path=ep_install_path,
+                conda_env_name=conda_env_name
+            )
+            
+            # Add metadata to indicate this was a single-year run
+            if isinstance(result, dict):
+                result["split_run_used"] = False
+                result["date_range"] = {
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "spans_years": False
+                }
+            
+            return result
+            
+    except ValueError as e:
+        error_msg = f"Invalid date format: {str(e)}"
+        logger.exception(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "message": "Date parsing failed - expected format: YYYY-MM-DD"
+        }
+        
+    except Exception as e:
+        error_msg = f"User request processing failed: {str(e)}"
+        logger.exception(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "message": "Request processing failed"
+        }

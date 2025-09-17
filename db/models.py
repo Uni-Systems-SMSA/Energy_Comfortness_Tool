@@ -41,15 +41,34 @@ Base = declarative_base(metadata=metadata)
 # 2️⃣  ORM CLASSES
 # ---------------------------------------------------------------------------
 
+class Space(Base):
+    """
+    Represents spaces with building information.
+    Each space belongs to a building and has location coordinates.
+    """
+    __tablename__ = "spaces"
+
+    space_id    = Column(String, primary_key=True)  # From CSV: space identifier (was sensor_id)
+    building_id = Column(String, nullable=False)    # From CSV: building identifier
+    latitude    = Column(Float, nullable=False)     # From CSV: building latitude in decimal degrees N
+    longitude   = Column(Float, nullable=False)     # From CSV: building longitude in decimal degrees E
+    created_at  = Column(DateTime, server_default=text("now()"))
+    updated_at  = Column(DateTime, server_default=text("now()"))
+
+    # relationships
+    measurements = relationship("Measurement", back_populates="space", cascade="all, delete-orphan")
+    weather_data = relationship("Weather", back_populates="space", cascade="all, delete-orphan")
+
+
 class Measurement(Base):
     __tablename__ = "measurements"
     __table_args__ = (
-        UniqueConstraint("time_end", "sensor_id", name="uq_meas_time_end_sensor"),
+        UniqueConstraint("time_end", "space_id", name="uq_meas_time_end_space"),
     )
 
     measurement_id = Column(Integer, primary_key=True)
     time_end       = Column(DateTime, nullable=False)
-    sensor_id      = Column(String,  nullable=False)
+    space_id       = Column(String, ForeignKey("spaces.space_id", ondelete="CASCADE"), nullable=False)
     window_seconds = Column(Numeric)
     time_stored    = Column(DateTime, server_default=text("now()"))
     data_type      = Column(String(20), nullable=False, server_default="train")
@@ -68,18 +87,18 @@ class Measurement(Base):
     pm10_ugm3            = Column(Numeric)
 
     # relationships
-    # (no relationships currently defined for Measurement)
+    space = relationship("Space", back_populates="measurements")
 
 
 class Weather(Base):
     __tablename__ = "weather"
     __table_args__ = (
-        UniqueConstraint("time_end", "sensor_id", name="uq_wx_time_end_sensor"),
+        UniqueConstraint("time_end", "space_id", name="uq_wx_time_end_space"),
     )
 
     weather_id  = Column(Integer, primary_key=True)
     time_end    = Column(DateTime, nullable=False)
-    sensor_id   = Column(String,  nullable=False)
+    space_id    = Column(String, ForeignKey("spaces.space_id", ondelete="CASCADE"), nullable=False)
 
     outdoor_temperature_2m        = Column(Float)
     outdoor_relative_humidity_2m  = Column(Float)
@@ -92,7 +111,8 @@ class Weather(Base):
     src        = Column(String(12), server_default="api")  # 'archive' | 'forecast' | 'api'
     fetched_at = Column(DateTime, server_default=text("now()"))
 
-    # predictions that used this weather row
+    # relationships
+    space = relationship("Space", back_populates="weather_data")
     predictions = relationship("Prediction", back_populates="weather", cascade="all, delete-orphan")
 
 
@@ -173,7 +193,8 @@ class EnergyBuilding(Base):
     """
     __tablename__ = "energy_buildings"
 
-    building_id = Column(Integer, primary_key=True)
+    energy_building_id = Column(Integer, primary_key=True)
+    building_id = Column(String, nullable=False)  # Building identifier from spaces
     simulation_timestamp = Column(DateTime, nullable=False)  # When the simulation was run
     
     # Simulation metadata
@@ -213,12 +234,12 @@ class EnergySpace(Base):
     """
     __tablename__ = "energy_spaces"
     __table_args__ = (
-        UniqueConstraint("building_id", "zone_id", name="uq_energy_space_building_zone"),
+        UniqueConstraint("energy_building_id", "zone_id", name="uq_energy_space_building_zone"),
     )
 
-    space_id = Column(Integer, primary_key=True)
-    building_id = Column(Integer, ForeignKey("energy_buildings.building_id", ondelete="CASCADE"), nullable=False)
-    sensor_id = Column(String, nullable=False)  # Links to the sensor associated with this space
+    energy_space_id = Column(Integer, primary_key=True)
+    energy_building_id = Column(Integer, ForeignKey("energy_buildings.energy_building_id", ondelete="CASCADE"), nullable=False)
+    space_id = Column(String, ForeignKey("spaces.space_id", ondelete="CASCADE"), nullable=False)
     
     # Zone identification
     zone_id = Column(String, nullable=False)    # EnergyPlus zone ID (e.g., "Zone1", "Office_1")
@@ -247,6 +268,7 @@ class EnergySpace(Base):
     
     # Relationships
     building = relationship("EnergyBuilding", back_populates="spaces")
+    space = relationship("Space")
     energy_timeseries = relationship("EnergyTimeSeries", back_populates="space", cascade="all, delete-orphan")
 
 
@@ -257,11 +279,11 @@ class EnergyTimeSeries(Base):
     """
     __tablename__ = "energy_timeseries"
     __table_args__ = (
-        UniqueConstraint("space_id", "timestamp", name="uq_energy_timeseries_space_timestamp"),
+        UniqueConstraint("energy_space_id", "timestamp", name="uq_energy_timeseries_space_timestamp"),
     )
 
     timeseries_id = Column(Integer, primary_key=True)
-    space_id = Column(Integer, ForeignKey("energy_spaces.space_id", ondelete="CASCADE"), nullable=False)
+    energy_space_id = Column(Integer, ForeignKey("energy_spaces.energy_space_id", ondelete="CASCADE"), nullable=False)
     
     # Timestamp for this data point
     timestamp = Column(DateTime, nullable=False)  # Simulation datetime

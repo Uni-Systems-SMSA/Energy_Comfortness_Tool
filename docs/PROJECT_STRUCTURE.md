@@ -32,7 +32,6 @@ energy_comfortness_tool/
 │   ├── helpers.py              # Comfort calculation helpers
 │   ├── model_zoo.py            # Machine learning models
 │   ├── pipeline_eplus.py       # EnergyPlus pipeline
-│   ├── pipeline_eplus_new.py   # New EnergyPlus pipeline
 │   ├── pipeline_eplus_wrapper.py # EnergyPlus wrapper
 │   ├── pipeline_ml.py          # ML training pipeline
 │   ├── pipeline_weather.py     # Weather data pipeline

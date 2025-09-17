@@ -84,7 +84,7 @@ REPORT_DIR = Path("./model_reports"); REPORT_DIR.mkdir(exist_ok=True, parents=Tr
 # ---------------------------------------------------------------------------
 
 def _fetch_base_dataframe(feats: List[str], target: str, ses) -> pd.DataFrame:
-    base_cols = {target, "time_end", "sensor_id"}
+    base_cols = {target, "time_end", "space_id"}
     weather_cols = set()
 
     for f in feats:
@@ -111,14 +111,14 @@ def _fetch_base_dataframe(feats: List[str], target: str, ses) -> pd.DataFrame:
         .join(
             Weather,
             (Measurement.time_end == Weather.time_end) &
-            (Measurement.sensor_id == Weather.sensor_id),
+            (Measurement.space_id == Weather.space_id),
             isouter=True
         )
         .filter(Measurement.data_type == "train")
     )
 
     df = pd.read_sql(q.statement, ses.bind, parse_dates=["time_end"])
-    df = df.sort_values(["sensor_id", "time_end"])
+    df = df.sort_values(["space_id", "time_end"])
     logger.debug("Fetched %d rows for %s", len(df), target)
     return df
 
@@ -135,7 +135,7 @@ def _add_derived_features(df: pd.DataFrame, feats: List[str]) -> pd.DataFrame:
         base, agg, win = m.group("base"), m.group("agg"), int(m.group("win"))
         rolled = (
             df.set_index("time_end")
-              .groupby("sensor_id")[base]
+              .groupby("space_id")[base]
               .rolling(f"{win}h", min_periods=1)
               .agg(_AGG_FUN[agg])
               .reset_index(level=0, drop=True)

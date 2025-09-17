@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 # versioning
-_VERSION = "0.0.4"
-_VERDATE = "04 Aug 2025"
+_VERSION = "0.0.10"
+_VERDATE = "15 Sep 2025"
 
 import os, sys, math, logging, importlib.util, shutil
 from pathlib import Path
@@ -34,12 +34,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 sys.path.append(os.path.abspath(os.path.join(__file__, "..", "..")))
 
 from db.session import SessionLocal  # type: ignore
-from db.models import Measurement, Weather, Prediction, TrainedModel, EnergyBuilding, EnergySpace, EnergyTimeSeries  # type: ignore[attr-defined]
+from db.models import Measurement, Weather, Prediction, TrainedModel, EnergyBuilding, EnergySpace, EnergyTimeSeries, Space  # type: ignore[attr-defined]
 from ece.pipeline_ml import main_train_all_targets  # type: ignore
 from ece.feature_map import MAP as FEATURE_MAP, TIME_DRIVERS
 from ece.weather_api import fetch_open_meteo
 from ece.pipeline_weather import generate_epw_for_location  # type: ignore
-from ece.pipeline_eplus_wrapper import run_eplus_simulation_async, test_bim2sim_environment  # type: ignore
+from ece.pipeline_eplus_wrapper import run_eplus_simulation_async, test_bim2sim_environment, run_user_request  # type: ignore
 
 
 def _convert_decimal_to_float(value):
@@ -58,26 +58,52 @@ def _convert_decimal_to_float(value):
     return value
 
 
-def _store_energy_simulation_results(simulation_results: dict, sensor_id: str, 
+def _store_energy_simulation_results(simulation_results: dict, space_id: str, 
                                    ifc_file_path: str, epw_file_path: str) -> bool:
     """
     Store energy simulation results in the database with timestamped energy data.
     
     Args:
         simulation_results: Dictionary containing simulation results from EnergyPlus
-        sensor_id: Sensor identifier that triggered the simulation
+        space_id: Space identifier that triggered the simulation
         ifc_file_path: Path to the IFC file used
         epw_file_path: Path to the EPW weather file used
         
     Returns:
         bool: True if storage was successful, False otherwise
     """
-    logger.info(f"Storing energy simulation results for sensor: {sensor_id}")
+    logger.info(f"Storing energy simulation results for space: {space_id}")
     logger.debug(f"Simulation results keys: {list(simulation_results.keys())}")
     logger.debug(f"Simulation results structure: {simulation_results}")
     
     try:
         with SessionLocal() as session:
+            # Get building_id from the Space table
+            space_record = session.query(Space).filter(Space.space_id == space_id).first()
+            
+            if not space_record:
+                logger.warning(f"Space {space_id} not found in database, creating default entry")
+                # Get coordinates from session state or use defaults
+                lat = st.session_state.get('init_lat', 40.6401)
+                lon = st.session_state.get('init_lon', 22.9444)
+                
+                # Check if there's a building_id in session state from CSV upload
+                default_building_id = st.session_state.get('current_building_id', f"building_{space_id}")
+                
+                # Create a default space if it doesn't exist
+                space_record = Space(
+                    space_id=space_id,
+                    building_id=default_building_id,
+                    latitude=lat,
+                    longitude=lon
+                )
+                session.add(space_record)
+                session.flush()
+                logger.debug(f"Created space record for {space_id} with building_id: {space_record.building_id}")
+            
+            building_id = space_record.building_id
+            logger.info(f"Using building_id: {building_id} for space: {space_id}")
+            
             # Parse energy data from simulation results
             # The simulation results structure might vary, so we need to handle different key names
             if 'eplus_results_path' in simulation_results:
@@ -92,15 +118,15 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
                     result_dirs = [d for d in export_dir.iterdir() if d.is_dir()]
                     if result_dirs:
                         actual_results_dir = result_dirs[0]
-                        logger.info(f"Found EnergyPlus results directory: {actual_results_dir}")
+                        logger.debug(f"Found EnergyPlus results directory: {actual_results_dir}")
                     else:
-                        logger.error(f"No result directories found in: {export_dir}")
+                        logger.exception(f"No result directories found in: {export_dir}")
                         return False
                 else:
-                    logger.error(f"Export directory not found: {export_dir}")
+                    logger.exception(f"Export directory not found: {export_dir}")
                     return False
             else:
-                logger.error(f"Neither 'eplus_results_path' nor 'project_path' found in simulation_results. Available keys: {list(simulation_results.keys())}")
+                logger.exception(f"Neither 'eplus_results_path' nor 'project_path' found in simulation_results. Available keys: {list(simulation_results.keys())}")
                 return False
             
             energy_data = _parse_energyplus_outputs(actual_results_dir)
@@ -138,20 +164,20 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
             zone_energy = energy_data.get('zone_energy', {})
             zones_count = len(zone_energy)
             
-            logger.info(f"📊 Energy data parsing summary:")
-            logger.info(f"   - Heating data: {'✅' if 'heating' in energy_data else '❌'}")
-            logger.info(f"   - Cooling data: {'✅' if 'cooling' in energy_data else '❌'}")
-            logger.info(f"   - Zone energy data: {'✅' if zone_energy else '❌'} ({zones_count} zones)")
-            logger.info(f"   - Space names: {'✅' if energy_data.get('space_names') else '❌'} ({len(energy_data.get('space_names', {}))} names)")
+            logger.info(f"Energy data parsing summary:")
+            logger.info(f"   - Heating data: {'YES' if 'heating' in energy_data else 'NO'}")
+            logger.info(f"   - Cooling data: {'YES' if 'cooling' in energy_data else 'NO'}")
+            logger.info(f"   - Zone energy data: {'YES' if zone_energy else 'NO'} ({zones_count} zones)")
+            logger.info(f"   - Space names: {'YES' if energy_data.get('space_names') else 'NO'} ({len(energy_data.get('space_names', {}))} names)")
             
             if zone_energy:
-                logger.info(f"   - Zone IDs found: {list(zone_energy.keys())}")
+                logger.debug(f"   - Zone IDs found: {list(zone_energy.keys())}")
                 for zone_id, zone_data in zone_energy.items():
                     has_heating_ts = bool(zone_data.get('heating_timeseries'))
                     has_cooling_ts = bool(zone_data.get('cooling_timeseries'))
-                    logger.info(f"     Zone '{zone_id}': heating_ts={has_heating_ts}, cooling_ts={has_cooling_ts}")
+                    logger.debug(f"     Zone '{zone_id}': heating_ts={has_heating_ts}, cooling_ts={has_cooling_ts}")
             else:
-                logger.warning("   ⚠️ No zone energy data means EnergySpace and EnergyTimeSeries records will NOT be created!")
+                logger.warning("   No zone energy data means EnergySpace and EnergyTimeSeries records will NOT be created!")
             
             # Prepare time series data (limit to reasonable size for database storage)
             heating_timeseries = energy_data.get('heating', {}).get('hourly_data', [])[:8760]  # Max 1 year
@@ -161,8 +187,9 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
             weather_file_path = simulation_results.get('weather_file', epw_file_path)
             ifc_file_path_from_results = simulation_results.get('ifc_file', ifc_file_path)
             
-            # Create EnergyBuilding record
+            # Create EnergyBuilding record with building_id
             energy_building = EnergyBuilding(
+                building_id=building_id,  # Add the building_id from space record
                 simulation_timestamp=simulation_timestamp,
                 simulation_start_date=simulation_start,
                 simulation_end_date=simulation_end,
@@ -182,11 +209,12 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
             session.add(energy_building)
             session.flush()  # Get the building_id
             
-            logger.info(f"Created EnergyBuilding record with ID: {energy_building.building_id}")
+            logger.debug(f"Created EnergyBuilding record with ID: {energy_building.energy_building_id}")
             
             # Create EnergySpace records and timestamped data for each zone
             space_names = energy_data.get('space_names', {})
             spaces_created = 0
+            spaces_skipped = 0
             timeseries_points_created = 0
             
             # Create datetime range for the time series data
@@ -194,7 +222,7 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
             if num_data_points > 0:
                 # Create hourly timestamps from simulation start (EnergyPlus generates hourly data)
                 timestamps = [simulation_start + timedelta(hours=i) for i in range(num_data_points)]
-                logger.info(f"Creating {num_data_points} hourly timestamped data points from {timestamps[0]} to {timestamps[-1]}")
+                logger.debug(f"Creating {num_data_points} hourly timestamped data points from {timestamps[0]} to {timestamps[-1]}")
             else:
                 timestamps = []
                 logger.warning("No time series data available for timestamp creation")
@@ -203,7 +231,14 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
                 # Get zone name from space mapping (case-insensitive lookup)
                 zone_name = space_names.get(zone_id.upper(), zone_id)
                 
-                logger.info(f"🏠 Processing zone: '{zone_id}' -> '{zone_name}'")
+                logger.debug(f"Processing zone: '{zone_id}' -> '{zone_name}'")
+                
+                # Check if this space exists in the spaces table before storing energy data
+                existing_space = session.query(Space).filter(Space.space_id == zone_name).first()
+                if not existing_space:
+                    logger.warning(f"SKIPPING: energy storage for zone '{zone_name}' - space not found in spaces table. Upload CSV data containing this space_id first.")
+                    spaces_skipped += 1
+                    continue
                 
                 # Extract zone-level energy data  
                 heating_kwh = float(zone_data.get('heating_kwh', 0))
@@ -226,8 +261,8 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
                 
                 # Create EnergySpace record
                 energy_space = EnergySpace(
-                    building_id=energy_building.building_id,
-                    sensor_id=zone_name,  # Use zone_name as sensor_id to match measurements tab naming
+                    energy_building_id=energy_building.energy_building_id,  # Fix: use energy_building_id not building_id
+                    space_id=zone_name,  # Use zone_name as space_id to match measurements tab naming
                     zone_id=zone_id,
                     zone_name=zone_name,
                     zone_type=zone_data.get('zone_type'),
@@ -246,7 +281,7 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
                 session.flush()  # Get the space_id
                 spaces_created += 1
                 
-                logger.info(f"   ✅ Created EnergySpace record with ID: {energy_space.space_id}")
+                logger.debug(f"   Created EnergySpace record with ID: {energy_space.space_id}")
                 
                 # Create timestamped energy data for this zone
                 heating_series = zone_data.get('heating_timeseries', [])
@@ -257,7 +292,7 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
                 if timestamps and heating_series and cooling_series:
                     # Ensure we have data to work with
                     max_points = min(len(timestamps), len(heating_series), len(cooling_series))
-                    logger.info(f"   📊 Creating {max_points} time series points for zone {zone_id}")
+                    logger.info(f"   Creating {max_points} time series points for zone {zone_id}")
                     
                     # Batch insert time series data
                     timeseries_data = []
@@ -277,7 +312,7 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
                         cumulative_cooling += cooling_energy_increment
                         
                         timeseries_data.append({
-                            'space_id': energy_space.space_id,
+                            'energy_space_id': energy_space.energy_space_id,  # Fix: use energy_space_id not space_id
                             'timestamp': timestamps[i],
                             'heating_power_w': heating_power,
                             'cooling_power_w': cooling_power,
@@ -309,13 +344,14 @@ def _store_energy_simulation_results(simulation_results: dict, sensor_id: str,
             logger.info(f"   - Building record ID: {energy_building.building_id}")
             logger.info(f"   - Total energy: {total_energy_kwh:.1f} kWh")
             logger.info(f"   - Zones stored: {spaces_created}")
+            logger.info(f"   - Zones skipped (no matching space): {spaces_skipped}")
             logger.info(f"   - Time series points stored: {timeseries_points_created}")
             logger.info(f"   - Results path: {actual_results_dir}")
             
             return True
             
     except Exception as e:
-        logger.error(f"ERROR Error storing energy simulation results: {str(e)}", exc_info=True)
+        logger.exception(f"ERROR Error storing energy simulation results: {str(e)}", exc_info=True)
         return False
 
 
@@ -370,22 +406,22 @@ def _load_space_names_from_csv(eplus_results_path: str) -> dict:
         return space_mapping
         
     except Exception as e:
-        logger.error(f"Error loading space names from CSV: {e}", exc_info=True)
+        logger.exception(f"Error loading space names from CSV: {e}", exc_info=True)
         return {}
 
 
-def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int = 1) -> Optional[dict]:
+def _get_energy_data_from_database(space_id: Optional[str] = None, limit: int = 1) -> Optional[dict]:
     """
     Retrieve energy simulation data from the database.
     
     Args:
-        sensor_id: Optional sensor ID to filter by (if None, gets latest for any sensor)
+        space_id: Optional space ID to filter by (if None, gets latest for any space)
         limit: Number of records to retrieve (default 1 for latest)
         
     Returns:
         Dictionary containing energy data in visualization format, or None
     """
-    logger.info(f"Retrieving energy data from database for sensor: {sensor_id or 'any'}")
+    logger.info(f"Retrieving energy data from database for space: {space_id or 'any'}")
     
     try:
         with SessionLocal() as session:
@@ -405,7 +441,7 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
             selected_building = None
             for building in buildings:
                 # Get spaces for this building
-                spaces = session.query(EnergySpace).filter_by(building_id=building.building_id).all()
+                spaces = session.query(EnergySpace).filter_by(energy_building_id=building.energy_building_id).all()
                 if spaces:
                     space_ids = [space.space_id for space in spaces]
                     
@@ -420,8 +456,8 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
                             filter_end_dt = datetime.combine(end_dt, datetime.min.time())
                         
                         # Check if building has data in this range
-                        data_count = session.query(EnergyTimeSeries).filter(
-                            EnergyTimeSeries.space_id.in_(space_ids),
+                        data_count = session.query(EnergyTimeSeries).join(EnergySpace).filter(
+                            EnergySpace.space_id.in_(space_ids),
                             EnergyTimeSeries.timestamp >= filter_start_dt,
                             EnergyTimeSeries.timestamp <= filter_end_dt
                         ).count()
@@ -446,13 +482,13 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
             
             # Get associated spaces
             spaces_query = session.query(EnergySpace).filter(
-                EnergySpace.building_id == building.building_id
+                EnergySpace.energy_building_id == building.energy_building_id
             )
             
-            # If a specific sensor_id is selected (not "latest"), filter to only that space
-            if sensor_id and sensor_id != "latest":
-                spaces_query = spaces_query.filter(EnergySpace.sensor_id == sensor_id)
-                logger.info(f"Filtering to space(s) for specific sensor: {sensor_id}")
+            # If a specific space_id is selected (not "latest"), filter to only that space
+            if space_id and space_id != "latest":
+                spaces_query = spaces_query.filter(EnergySpace.space_id == space_id)
+                logger.info(f"Filtering to space(s) for specific space: {space_id}")
             
             spaces = spaces_query.all()
             logger.info(f"Found {len(spaces)} energy spaces for building {building.building_id}")
@@ -474,20 +510,20 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
             logger.info(f"Filtered to {len(valid_spaces)} valid spaces (found in space.csv)")
             
             # Log the filtering context for clarity
-            if sensor_id and sensor_id != "latest":
+            if space_id and space_id != "latest":
                 if len(valid_spaces) == 1:
                     space_name = space_names_from_csv.get(valid_spaces[0].zone_id.upper(), valid_spaces[0].zone_id)
-                    logger.info(f"📍 Showing energy data for specific space: '{space_name}' (sensor: {sensor_id})")
+                    logger.info(f"📍 Showing energy data for specific space: '{space_name}' (space: {space_id})")
                 elif len(valid_spaces) == 0:
-                    logger.warning(f"ERROR No spaces found for sensor {sensor_id}")
+                    logger.warning(f"ERROR No spaces found for space {space_id}")
                 else:
-                    logger.info(f"📍 Showing energy data for {len(valid_spaces)} spaces matching sensor: {sensor_id}")
+                    logger.info(f"📍 Showing energy data for {len(valid_spaces)} spaces matching space: {space_id}")
             else:
                 logger.info(f"DATA Showing energy data for all {len(valid_spaces)} spaces in building")
             
             # Initialize filtered totals - will be recalculated from space data if date filtering is applied
-            # For specific sensor selection, start with 0 and accumulate only from selected spaces
-            if sensor_id and sensor_id != "latest":
+            # For specific space selection, start with 0 and accumulate only from selected spaces
+            if space_id and space_id != "latest":
                 # For space-specific view, start with 0 and accumulate from selected spaces only
                 filtered_total_heating_kwh = 0.0
                 filtered_total_cooling_kwh = 0.0
@@ -537,8 +573,9 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
                 # Get REAL timestamps from database for building-wide view
                 building_timestamps = []
                 if heating_hourly_data:  # Only query if we have data
-                    timestamps_query = session.query(EnergyTimeSeries.timestamp).filter(
-                        EnergyTimeSeries.building_id == building_id
+                    # Join through EnergySpace to filter by building
+                    timestamps_query = session.query(EnergyTimeSeries.timestamp).join(EnergySpace).filter(
+                        EnergySpace.energy_building_id == building.energy_building_id
                     ).order_by(EnergyTimeSeries.timestamp)
                     
                     # Apply date filtering if provided
@@ -582,7 +619,7 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
                     'eplus_results_path': building.eplus_results_path,
                     'zones_count': building.zones_count,
                     'is_space_specific': is_space_specific,  # Add flag for visualization
-                    'selected_sensor_id': sensor_id if is_space_specific else None
+                    'selected_space_id': space_id if is_space_specific else None
                 }
             }
             
@@ -595,7 +632,7 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
                 
                 # Get timestamped data for this space
                 timeseries_query = session.query(EnergyTimeSeries).filter(
-                    EnergyTimeSeries.space_id == space.space_id
+                    EnergyTimeSeries.energy_space_id == space.energy_space_id
                 ).order_by(EnergyTimeSeries.timestamp)
                 
                 # Apply date filtering if start_dt and end_dt are available in session state
@@ -676,7 +713,7 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
                     'heating_intensity_kwh_m2': float(space.heating_intensity_kwh_m2) if space.heating_intensity_kwh_m2 else None,
                     'cooling_intensity_kwh_m2': float(space.cooling_intensity_kwh_m2) if space.cooling_intensity_kwh_m2 else None,
                     'zone_type': space.zone_type,
-                    'sensor_id': space.sensor_id,  # Include sensor association
+                    'space_id': space.space_id,  # Include sensor association
                     'heating_timeseries': heating_timeseries,  # Add timestamped data
                     'cooling_timeseries': cooling_timeseries   # Add timestamped data
                 }
@@ -714,7 +751,7 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
                         date_range = session.query(
                             func.min(EnergyTimeSeries.timestamp).label('min_date'),
                             func.max(EnergyTimeSeries.timestamp).label('max_date')
-                        ).filter(EnergyTimeSeries.space_id.in_(space_ids)).first()
+                        ).join(EnergySpace).filter(EnergySpace.space_id.in_(space_ids)).first()
                         
                         if date_range and date_range.min_date:
                             logger.warning(f"WARNING Date filtering resulted in no data. Available data range: {date_range.min_date.date()} to {date_range.max_date.date()}")
@@ -747,12 +784,12 @@ def _get_energy_data_from_database(sensor_id: Optional[str] = None, limit: int =
             logger.info(f"   - Date filtered: {'Yes' if is_date_filtered else 'No'}")
             logger.info(f"   - Space-specific: {'Yes' if is_space_specific else 'No'}")
             if is_space_specific:
-                logger.info(f"   - Selected sensor: {sensor_id}")
+                logger.info(f"   - Selected space: {space_id}")
             
             return energy_data
             
     except Exception as e:
-        logger.error(f"ERROR Error retrieving energy data from database: {str(e)}", exc_info=True)
+        logger.exception(f"ERROR Error retrieving energy data from database: {str(e)}", exc_info=True)
         return None
 
 
@@ -814,20 +851,20 @@ def _get_latest_simulation_results() -> Optional[dict]:
         return simulation_results
         
     except Exception as e:
-        logger.error(f"Error loading latest simulation results: {e}", exc_info=True)
+        logger.exception(f"Error loading latest simulation results: {e}", exc_info=True)
         return None
 
 
-def _display_energy_results(simulation_results: dict, sensor_id: str) -> None:
+def _display_energy_results(simulation_results: dict, space_id: str) -> None:
     """
     Display energy consumption results from EnergyPlus simulation.
     Only uses data from database - no CSV fallback.
     
     Args:
         simulation_results: Dictionary containing simulation results
-        sensor_id: Sensor identifier for the simulation
+        space_id: Sensor identifier for the simulation
     """
-    logger.info(f"Displaying energy results for sensor: {sensor_id}")
+    logger.info(f"Displaying energy results for sensor: {space_id}")
     logger.debug(f"Simulation results keys: {list(simulation_results.keys())}")
     
     st.subheader("📊 Energy Analysis Results")
@@ -835,7 +872,7 @@ def _display_energy_results(simulation_results: dict, sensor_id: str) -> None:
     try:
         # Get energy data from database only
         logger.info("Attempting to retrieve energy data from database")
-        energy_data = _get_energy_data_from_database(sensor_id=sensor_id if sensor_id != "latest" else None)
+        energy_data = _get_energy_data_from_database(space_id=space_id if space_id != "latest" else None)
         
         if energy_data:
             logger.info("SUCCESS Successfully retrieved energy data from database")
@@ -861,7 +898,7 @@ def _display_energy_results(simulation_results: dict, sensor_id: str) -> None:
                     first_ts = session.query(EnergyTimeSeries.timestamp).order_by(EnergyTimeSeries.timestamp.asc()).first()
                     last_ts = session.query(EnergyTimeSeries.timestamp).order_by(EnergyTimeSeries.timestamp.desc()).first()
                     total_records = session.query(EnergyTimeSeries).count()
-                    total_spaces = session.query(EnergySpace).filter(EnergySpace.building_id == latest_building.building_id).count()
+                    total_spaces = session.query(EnergySpace).filter(EnergySpace.energy_building_id == latest_building.energy_building_id).count()
                     
                     if first_ts and last_ts and total_spaces > 0:
                         records_per_space = total_records // total_spaces
@@ -880,13 +917,13 @@ def _display_energy_results(simulation_results: dict, sensor_id: str) -> None:
             end_dt = st.session_state.get('end_dt', None)
             
             # Create visualizations using database data
-            _create_energy_visualizations(energy_data, sensor_id, start_dt, end_dt)
+            _create_energy_visualizations(energy_data, space_id, start_dt, end_dt)
         else:
             logger.info("No energy data found in database")
             st.info("📊 No energy simulation data available in database.")
             st.info("💡 Run an energy simulation to generate and store energy data.")
     except Exception as e:
-        logger.error(f"Error processing energy results: {str(e)}", exc_info=True)
+        logger.exception(f"Error processing energy results: {str(e)}", exc_info=True)
         st.error(f"❌ Error processing energy results: {str(e)}")
 
 
@@ -968,7 +1005,7 @@ def _parse_energyplus_outputs(results_dir: Path) -> dict:
                     logger.debug(f"Available columns: {list(space_df.columns)}")
                     
             except Exception as e:
-                logger.error(f"ERROR Error reading space.csv file: {e}", exc_info=True)
+                logger.exception(f"ERROR Error reading space.csv file: {e}", exc_info=True)
         else:
             logger.warning(f"ERROR No space.csv file found at expected location: {space_csv_path}")
             # Try alternative locations for debugging
@@ -1019,7 +1056,7 @@ def _parse_energyplus_outputs(results_dir: Path) -> dict:
         logger.info(f"Completed parsing EnergyPlus outputs. Data sections: {list(energy_data.keys())}")
                 
     except Exception as e:
-        logger.error(f"Error parsing EnergyPlus outputs: {e}", exc_info=True)
+        logger.exception(f"Error parsing EnergyPlus outputs: {e}", exc_info=True)
         
     return energy_data
 
@@ -1071,7 +1108,7 @@ def _get_simulation_year_from_epw(results_dir: Path) -> Optional[int]:
             logger.warning(f"ERROR Weather directory not found: {weather_dir}")
             
     except Exception as e:
-        logger.error(f"ERROR Error extracting year from EPW file: {e}", exc_info=True)
+        logger.exception(f"ERROR Error extracting year from EPW file: {e}", exc_info=True)
     
     return None
 
@@ -1089,8 +1126,8 @@ def _parse_csv_file(csv_file: Path, start_dt=None, end_dt=None) -> dict:
         
         # Filter by time range if provided
         if start_dt is not None and end_dt is not None:
-            logger.warning(f"⚠️ DATE FILTERING APPLIED during CSV parsing: {start_dt} to {end_dt}")
-            logger.warning("⚠️ This should ONLY happen during visualization, NOT during simulation storage!")
+            logger.warning(f"DATE FILTERING APPLIED during CSV parsing: {start_dt} to {end_dt}")
+            logger.warning("This should ONLY happen during visualization, NOT during simulation storage!")
             # Check if there's a Date/Time column in the CSV
             time_cols = [col for col in df.columns if any(word in col.lower() for word in ['date', 'time', 'hour', 'timestamp'])]
             logger.debug(f"Found potential time columns: {time_cols}")
@@ -1189,7 +1226,7 @@ def _parse_csv_file(csv_file: Path, start_dt=None, end_dt=None) -> dict:
             else:
                 logger.info("No recognizable time columns found in CSV. EnergyPlus simulations should have Date/Time data.")
         else:
-            logger.info("✅ No date filtering applied - parsing complete simulation data")
+            logger.info("No date filtering applied - parsing complete simulation data")
             logger.debug("This is correct behavior when storing simulation results")
         
         # Find heating and cooling energy columns
@@ -1302,7 +1339,7 @@ def _parse_csv_file(csv_file: Path, start_dt=None, end_dt=None) -> dict:
                     logger.warning(f"ERROR Space CSV file has insufficient columns: {len(space_df.columns)} (need at least 3)")
                     
             except Exception as e:
-                logger.error(f"ERROR Error reading space.csv file: {e}", exc_info=True)
+                logger.exception(f"ERROR Error reading space.csv file: {e}", exc_info=True)
         else:
             logger.warning(f"ERROR No space.csv file found at expected location: {space_csv_path}")
             
@@ -1407,38 +1444,38 @@ def _parse_csv_file(csv_file: Path, start_dt=None, end_dt=None) -> dict:
                 cooling_points = len(zone_info.get('cooling_timeseries', []))
                 logger.info(f"   Zone '{zone_id}': H={heating_kwh:.2f}kWh({heating_points}pts), C={cooling_kwh:.2f}kWh({cooling_points}pts)")
         else:
-            logger.error("ERROR No zone-specific energy data found in CSV (after space.csv filtering)")
-            logger.error("   This means EnergySpace and EnergyTimeSeries records will NOT be created")
+            logger.exception("ERROR No zone-specific energy data found in CSV (after space.csv filtering)")
+            logger.exception("   This means EnergySpace and EnergyTimeSeries records will NOT be created")
             
             # Debug information to help identify the issue
             if not space_names_from_csv:
-                logger.error("   Root cause: No space.csv data loaded")
+                logger.exception("   Root cause: No space.csv data loaded")
             elif not zone_columns:
-                logger.error("   Root cause: No zone energy columns found in CSV")
+                logger.exception("   Root cause: No zone energy columns found in CSV")
             else:
-                logger.error("   Root cause: Zone ID mismatch between CSV columns and space.csv")
-                logger.error(f"   Zone prefixes from CSV: {sorted(set(col.split(':')[0].upper() for col in zone_columns))}")
-                logger.error(f"   Space IDs from space.csv: {sorted(list(space_names_from_csv.keys()))}")
+                logger.exception("   Root cause: Zone ID mismatch between CSV columns and space.csv")
+                logger.exception(f"   Zone prefixes from CSV: {sorted(set(col.split(':')[0].upper() for col in zone_columns))}")
+                logger.exception(f"   Space IDs from space.csv: {sorted(list(space_names_from_csv.keys()))}")
             
         logger.info(f"CSV parsing completed successfully. Data sections: {list(data.keys())}")
             
     except Exception as e:
-        logger.error(f"Error parsing CSV file: {e}", exc_info=True)
+        logger.exception(f"Error parsing CSV file: {e}", exc_info=True)
         
     return data
 
 
-def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=None, end_dt=None) -> None:
+def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=None, end_dt=None) -> None:
     """
     Create visualizations for energy consumption data.
     
     Args:
         energy_data: Parsed energy data from EnergyPlus
-        sensor_id: Sensor identifier
+        space_id: Sensor identifier
         start_dt: Start datetime for filtering (optional)
         end_dt: End datetime for filtering (optional)
     """
-    logger.info(f"Creating energy visualizations for sensor: {sensor_id}")
+    logger.info(f"Creating energy visualizations for sensor: {space_id}")
     if start_dt and end_dt:
         logger.info(f"Time range filtering: {start_dt} to {end_dt}")
     logger.debug(f"Energy data sections available: {list(energy_data.keys())}")
@@ -1446,17 +1483,17 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
     # Check if this is space-specific view
     building_metadata = energy_data.get('building_metadata', {})
     is_space_specific = building_metadata.get('is_space_specific', False)
-    selected_sensor_id = building_metadata.get('selected_sensor_id')
+    selected_space_id = building_metadata.get('selected_space_id')
     
     # Get space name for space-specific view
     space_name = None
-    if is_space_specific and sensor_id and sensor_id != "latest":
+    if is_space_specific and space_id and space_id != "latest":
         # Find the space name for the selected sensor
         zone_energy = energy_data.get('zone_energy', {})
         space_names = energy_data.get('space_names', {})
         
         for zone_id, zone_data in zone_energy.items():
-            if zone_data.get('sensor_id') == sensor_id:
+            if zone_data.get('space_id') == space_id:
                 zone_id_upper = zone_id.upper()
                 space_name = space_names.get(zone_id_upper, zone_id)
                 break
@@ -1487,11 +1524,11 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
     
     # Heating Energy Analysis
     with col1:
-        heating_title = "HEATING Heating Energy"
+        heating_title = "🔥 Heating Energy"
         if is_space_specific and space_name:
             heating_title += f" - {space_name}"
         elif is_space_specific:
-            heating_title += f" - Sensor {sensor_id}"
+            heating_title += f" - Sensor {space_id}"
         st.markdown(f"### {heating_title}")
         
         if 'heating' in energy_data:
@@ -1529,18 +1566,24 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
                     logger.info(f"📅 Using REAL database timestamps: {len(real_timestamps)} timestamps from {real_timestamps[0] if real_timestamps else 'N/A'} to {real_timestamps[-1] if real_timestamps else 'N/A'}")
                     
                     # Sample data to daily averages for visualization
-                    if len(hourly_heating) >= 24:
+                    if len(hourly_heating) >= 24 and len(real_timestamps) >= 24:
                         # Calculate daily averages from hourly data
                         daily_avg = [np.mean(hourly_heating[i:i+24]) for i in range(0, len(hourly_heating), 24)]
-                        # Sample timestamps to daily (every 24th timestamp)
-                        date_range = [real_timestamps[i] for i in range(0, len(real_timestamps), 24)][:len(daily_avg)]
+                        # Sample timestamps to daily (every 24th timestamp), ensuring same length
+                        daily_timestamps = [real_timestamps[i] for i in range(0, len(real_timestamps), 24)]
+                        
+                        # Ensure both arrays have the same length
+                        min_length = min(len(daily_avg), len(daily_timestamps))
+                        daily_avg = daily_avg[:min_length]
+                        date_range = daily_timestamps[:min_length]
                     else:
-                        # Use hourly data as-is for shorter periods
-                        daily_avg = hourly_heating
-                        date_range = real_timestamps[:len(daily_avg)]
+                        # Use hourly data as-is for shorter periods, ensuring same length
+                        min_length = min(len(hourly_heating), len(real_timestamps))
+                        daily_avg = hourly_heating[:min_length]
+                        date_range = real_timestamps[:min_length]
                 else:
                     # Fallback if no timestamps available (should not happen)
-                    logger.error("❌ NO REAL TIMESTAMPS AVAILABLE - This should never happen!")
+                    logger.exception("ERROR: NO REAL TIMESTAMPS AVAILABLE - This should never happen!")
                     st.error("No timestamp data available for visualization")
                     daily_avg = []
                     date_range = []
@@ -1558,7 +1601,7 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
                 if is_space_specific and space_name:
                     chart_title += f" - {space_name}"
                 elif is_space_specific:
-                    chart_title += f" - Sensor {sensor_id}"
+                    chart_title += f" - Sensor {space_id}"
                 if start_dt and end_dt:
                     chart_title += " (Filtered Period)"
                 heating_chart = alt.Chart(heating_df).mark_line(
@@ -1567,7 +1610,7 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
                     alt.selection_interval(bind='scales')
                 ).encode(
                     x=alt.X('Timestamp:T', title='Date', axis=alt.Axis(format='%d %b %Y', labelAngle=-45)),
-                    y=alt.Y('Heating_Power_W:Q', title='Heating Power (W)'),
+                    y=alt.Y('Heating_Power_W:Q', title=''),
                     tooltip=[
                         alt.Tooltip('Timestamp:T', title='Date', format='%d %b %Y'),
                         alt.Tooltip('Heating_Power_W:Q', title='Heating Power (W)', format='.1f')
@@ -1586,11 +1629,11 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
     
     # Cooling Energy Analysis  
     with col2:
-        cooling_title = "COOLING Cooling Energy"
+        cooling_title = "❄️ Cooling Energy"
         if is_space_specific and space_name:
             cooling_title += f" - {space_name}"
         elif is_space_specific:
-            cooling_title += f" - Sensor {sensor_id}"
+            cooling_title += f" - Sensor {space_id}"
         st.markdown(f"### {cooling_title}")
         
         if 'cooling' in energy_data:
@@ -1628,18 +1671,24 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
                     logger.info(f"📅 Using REAL database timestamps for cooling: {len(real_timestamps)} timestamps from {real_timestamps[0] if real_timestamps else 'N/A'} to {real_timestamps[-1] if real_timestamps else 'N/A'}")
                     
                     # Sample data to daily averages for visualization
-                    if len(hourly_cooling) >= 24:
+                    if len(hourly_cooling) >= 24 and len(real_timestamps) >= 24:
                         # Calculate daily averages from hourly data
                         daily_avg = [np.mean(hourly_cooling[i:i+24]) for i in range(0, len(hourly_cooling), 24)]
-                        # Sample timestamps to daily (every 24th timestamp)
-                        date_range = [real_timestamps[i] for i in range(0, len(real_timestamps), 24)][:len(daily_avg)]
+                        # Sample timestamps to daily (every 24th timestamp), ensuring same length
+                        daily_timestamps = [real_timestamps[i] for i in range(0, len(real_timestamps), 24)]
+                        
+                        # Ensure both arrays have the same length
+                        min_length = min(len(daily_avg), len(daily_timestamps))
+                        daily_avg = daily_avg[:min_length]
+                        date_range = daily_timestamps[:min_length]
                     else:
-                        # Use hourly data as-is for shorter periods
-                        daily_avg = hourly_cooling
-                        date_range = real_timestamps[:len(daily_avg)]
+                        # Use hourly data as-is for shorter periods, ensuring same length
+                        min_length = min(len(hourly_cooling), len(real_timestamps))
+                        daily_avg = hourly_cooling[:min_length]
+                        date_range = real_timestamps[:min_length]
                 else:
                     # Fallback if no timestamps available (should not happen)
-                    logger.error("❌ NO REAL TIMESTAMPS AVAILABLE FOR COOLING - This should never happen!")
+                    logger.exception("ERROR: NO REAL TIMESTAMPS AVAILABLE FOR COOLING - This should never happen!")
                     st.error("No timestamp data available for cooling visualization")
                     daily_avg = []
                     date_range = []
@@ -1657,7 +1706,7 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
                 if is_space_specific and space_name:
                     chart_title += f" - {space_name}"
                 elif is_space_specific:
-                    chart_title += f" - Sensor {sensor_id}"
+                    chart_title += f" - Sensor {space_id}"
                 if start_dt and end_dt:
                     chart_title += " (Filtered Period)"
                 cooling_chart = alt.Chart(cooling_df).mark_line(
@@ -1666,7 +1715,7 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
                     alt.selection_interval(bind='scales')
                 ).encode(
                     x=alt.X('Timestamp:T', title='Date', axis=alt.Axis(format='%d %b %Y', labelAngle=-45)),
-                    y=alt.Y('Cooling_Power_W:Q', title='Cooling Power (W)'),
+                    y=alt.Y('Cooling_Power_W:Q', title=''),
                     tooltip=[
                         alt.Tooltip('Timestamp:T', title='Date', format='%d %b %Y'),
                         alt.Tooltip('Cooling_Power_W:Q', title='Cooling Power (W)', format='.1f')
@@ -1734,7 +1783,7 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
         
         if pie_data:
             pie_df = pd.DataFrame(pie_data)
-            logger.info(f"Creating pie chart with {len(pie_df)} spaces, total: {pie_df['Energy_kWh'].sum():.1f} kWh")
+            logger.debug(f"Creating pie chart with {len(pie_df)} spaces, total: {pie_df['Energy_kWh'].sum():.1f} kWh")
             
             # Create two columns for pie chart and data table
             pie_col1, pie_col2 = st.columns([2, 1])
@@ -1799,7 +1848,7 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
         zone_info = energy_data.get('zones', {})
         space_names = energy_data.get('space_names', {})
         
-        logger.info(f"Displaying zone energy breakdown for {len(zone_energy)} zones")
+        logger.debug(f"Displaying zone energy breakdown for {len(zone_energy)} zones")
         logger.debug(f"Available zone_energy keys: {list(zone_energy.keys())}")
         logger.debug(f"Available zone_info keys: {list(zone_info.keys()) if zone_info else 'None'}")
         logger.debug(f"Available space_names keys: {list(space_names.keys()) if space_names else 'None'}")
@@ -1954,14 +2003,14 @@ def _create_energy_visualizations(energy_data: dict, sensor_id: str, start_dt=No
                 st.json(zones)
 
 
-def _find_existing_epw_file(sensor_id: str, start_date: date, end_date: date) -> Optional[Path]:
+def _find_existing_epw_file(space_id: str, start_date: date, end_date: date) -> Optional[Path]:
     """
     Check if an EPW file already exists for the given sensor and date range.
     Prioritizes full-year EPW files over partial period files.
     
     Parameters
     ----------
-    sensor_id : str
+    space_id : str
         Sensor identifier
     start_date : date
         Start date for the simulation period
@@ -1979,7 +2028,7 @@ def _find_existing_epw_file(sensor_id: str, start_date: date, end_date: date) ->
     
     # First, check for full-year EPW file (preferred for EnergyPlus)
     year = start_date.year
-    full_year_filename = f"weather_{sensor_id}_{year}_full_year.epw"
+    full_year_filename = f"weather_{space_id}_{year}_full_year.epw"
     full_year_path = weather_dir / full_year_filename
     
     if full_year_path.exists():
@@ -1988,14 +2037,14 @@ def _find_existing_epw_file(sensor_id: str, start_date: date, end_date: date) ->
     # Fallback: check for specific date range file
     start_str = start_date.strftime("%Y%m%d")
     end_str = end_date.strftime("%Y%m%d")
-    expected_filename = f"weather_{sensor_id}_{start_str}_{end_str}.epw"
+    expected_filename = f"weather_{space_id}_{start_str}_{end_str}.epw"
     expected_path = weather_dir / expected_filename
     
     if expected_path.exists():
         return expected_path
     
     # Also check for files with similar date ranges (within a few days)
-    pattern = f"weather_{sensor_id}_*.epw"
+    pattern = f"weather_{space_id}_*.epw"
     for epw_file in weather_dir.glob(pattern):
         try:
             # Check if it's a full-year file
@@ -2031,12 +2080,8 @@ from ece.helpers import (                                   # noqa: E402
 )
 
 # ------------------- project logger -------------------
-try:
-    from ece.utils.logging import get_logger  # type: ignore[attr-defined]
-    logger = get_logger(__name__)
-except Exception:  # fallback
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s – %(message)s")
-    logger = logging.getLogger(__name__)
+from ece.utils.logging import get_logger
+logger = get_logger(__name__)
 
 # --------------------- FILE LOCATIONS -------------------------
 LOGO = Path("./dashboard/assets/images/logo.png")
@@ -2131,16 +2176,53 @@ _CLASS_ORDER = ["A", "B", "C", "D", "NC"]
 # Helpers
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=300)
-def _get_sensor_ids() -> list[str]:
-    """Return all distinct sensor_id values (sorted) from the DB."""
+def _get_building_ids() -> list[str]:
+    """Return all distinct building_id values (sorted) from the DB."""
     with SessionLocal() as ses:
+        from db.models import Space
         rows = (
-            ses.query(Measurement.sensor_id)
-               .filter(Measurement.sensor_id != None)  # noqa: E711
+            ses.query(Space.building_id)
+               .filter(Space.building_id != None)  # noqa: E711
                .distinct()
                .all()
         )
     return sorted(r[0] for r in rows if r[0])
+
+def _get_space_ids(building_id: str = None) -> list[str]:
+    """Return all distinct space_id values (sorted) from the DB, optionally filtered by building."""
+    with SessionLocal() as ses:
+        from db.models import Space
+        query = ses.query(Space.space_id).filter(Space.space_id != None)  # noqa: E711
+        if building_id:
+            query = query.filter(Space.building_id == building_id)
+        rows = query.distinct().all()
+    return sorted(r[0] for r in rows if r[0])
+
+def _is_system_configured() -> bool:
+    """Check if the system has been configured with data (spaces, measurements, or models)."""
+    try:
+        with SessionLocal() as ses:
+            from db.models import Space, Measurement, TrainedModel
+            
+            # Check if we have any spaces (indicates initialization happened)
+            spaces_count = ses.query(Space).count()
+            if spaces_count > 0:
+                return True
+            
+            # Check if we have any measurements (indicates data upload)
+            measurements_count = ses.query(Measurement).count()
+            if measurements_count > 0:
+                return True
+                
+            # Check if we have any trained models
+            models_count = ses.query(TrainedModel).count()
+            if models_count > 0:
+                return True
+                
+            return False
+    except Exception as e:
+        logger.warning(f"Error checking system configuration: {e}")
+        return False
 
 def _clear_cache():
     """Clear all Streamlit caches to free up memory and force fresh data loading."""
@@ -2186,9 +2268,8 @@ def _reset_all():
 
         # wipe folders including EnergyPlus simulation results and weather files
         folders_to_reset = [
-            "./models", 
-            "./model_reports", 
-            "./uploads",
+            "../models", 
+            "../model_reports", 
             "./eplus_sim/results",
             "./eplus_sim/weather",
             "./eplus_sim/models",
@@ -2209,7 +2290,7 @@ def _reset_all():
 
     # clear Streamlit session including energy simulation state
     energy_keys_to_clear = [
-        'latest_epw_path', 'latest_sensor_id', 'simulation_running', 
+        'latest_epw_path', 'latest_space_id', 'simulation_running', 
         'prevent_rerun', 'latest_simulation_results'
     ]
     for key in energy_keys_to_clear:
@@ -2219,6 +2300,570 @@ def _reset_all():
     
     st.session_state.clear()
     st.sidebar.success("Workspace reset – fresh start!")
+
+
+def _show_csv_format_help():
+    """Display CSV format help in an expandable section."""
+    with st.expander("📋 CSV Format Guide", expanded=False):
+        st.markdown("""
+        ### **New Format (Recommended)**
+        Your CSV should include these columns:
+        
+        **Required columns:**
+        - `time_end` - Timestamp (YYYY-MM-DD HH:MM:SS)
+        - `space_id` - Unique identifier for the space/room
+        - `building_id` - Identifier for the building
+        - `latitude` - Latitude coordinate for weather data
+        - `longitude` - Longitude coordinate for weather data
+        
+        **Measurement columns (at least one required):**
+        - `temperature_c` - Temperature in Celsius
+        - `energy_kwh` - Energy consumption in kWh
+        - `co2_ppm` - CO2 levels in ppm
+        - `rh_percent` - Relative humidity percentage
+        - `luminance_lux` - Light levels in lux
+        - `average_noise_db` - Average noise in decibels
+        - `pm2_5_ugm3` - PM2.5 particles in μg/m³
+        - `tvoc_ppb` - Total VOCs in ppb
+        - `peak_db` - Peak noise in decibels
+        - `co_ppm` - Carbon monoxide in ppm
+        - `pm10_ugm3` - PM10 particles in μg/m³
+        
+        **Optional columns:**
+        - `time_stored` - When data was recorded (auto-generated if missing)
+        - `window_seconds` - Time window for measurements
+        - `data_type` - Will be set based on upload type
+        
+        ### **Legacy Format**
+        If you have older data, you can use:
+        - `time_end` + `space_id` + measurement columns
+        - No coordinates in CSV (weather data fetching will be skipped)
+        
+        ### **Example CSV Header:**
+        ```
+        time_end,space_id,building_id,latitude,longitude,temperature_c,energy_kwh,co2_ppm
+        2024-01-01 10:00:00,room_101,building_a,40.7128,-74.0060,22.5,1.2,450
+        2024-01-01 11:00:00,room_102,building_a,40.7128,-74.0060,23.1,0.8,430
+        ```
+        
+        ### **Data Tips:**
+        - Use consistent timezone for all timestamps
+        - Space IDs should be unique within a building
+        - Coordinates should be decimal degrees (not DMS format)
+        - Missing measurement values are allowed (will be stored as NULL)
+        """)
+
+def _validate_csv_columns(df: pd.DataFrame, dtype: str) -> tuple[bool, list[str], list[str]]:
+    """
+    Validate CSV columns and provide detailed feedback about missing columns.
+    
+    Args:
+        df: DataFrame to validate
+        dtype: Data type being imported (train/inference)
+    
+    Returns:
+        tuple: (is_valid, missing_required, missing_optional)
+    """
+    # Define required columns for different data types
+    base_required = ["time_end"]  # Always required
+    measurement_columns = [
+        "temperature_c", "energy_kwh", "co2_ppm", "rh_percent",
+        "luminance_lux", "average_noise_db", "pm2_5_ugm3", "tvoc_ppb",
+        "peak_db", "co_ppm", "pm10_ugm3"
+    ]
+    
+    # Check for new format (preferred) vs legacy format
+    has_new_format = all(col in df.columns for col in ["space_id", "building_id", "latitude", "longitude"])
+    has_legacy_format = "space_id" in df.columns
+    has_space_identifier = has_new_format or has_legacy_format
+    
+    # Required columns based on format
+    if has_new_format:
+        space_required = ["space_id", "building_id", "latitude", "longitude"]
+        format_name = "New format (space_id, building_id, coordinates)"
+    elif has_legacy_format:
+        space_required = ["space_id"]
+        format_name = "Legacy format (space_id)"
+    else:
+        space_required = ["space_id"]  # Default expectation
+        format_name = "Expected format"
+    
+    required_columns = base_required + space_required
+    
+    # Check for missing required columns
+    missing_required = [col for col in required_columns if col not in df.columns]
+    
+    # Check for missing measurement columns (at least one should be present)
+    available_measurements = [col for col in measurement_columns if col in df.columns]
+    if not available_measurements:
+        missing_required.append("at least one measurement column (temperature_c, energy_kwh, etc.)")
+    
+    # Optional columns that enhance functionality
+    optional_columns = ["time_stored", "window_seconds", "data_type"]
+    missing_optional = [col for col in optional_columns if col not in df.columns]
+    
+    is_valid = len(missing_required) == 0
+    
+    # Log validation results
+    logger.info(f"CSV validation for {dtype} data:")
+    logger.info(f"  - Format detected: {format_name}")
+    logger.info(f"  - Columns found: {list(df.columns)}")
+    logger.info(f"  - Required columns missing: {missing_required}")
+    logger.info(f"  - Optional columns missing: {missing_optional}")
+    logger.info(f"  - Available measurements: {available_measurements}")
+    logger.info(f"  - Validation result: {'PASS' if is_valid else 'FAIL'}")
+    
+    return is_valid, missing_required, missing_optional
+
+
+def _insert_csv(file: bytes, dtype: str, lat: float | None = None, lon: float | None = None):
+    try:
+        # Try to parse with time_stored first, fall back if not present
+        try:
+            df = pd.read_csv(file, parse_dates=["time_end", "time_stored"])
+        except (ValueError, KeyError):
+            # time_stored column might not exist, parse only time_end
+            df = pd.read_csv(file, parse_dates=["time_end"])
+    except Exception as exc:
+        st.sidebar.error(f"Could not read CSV: {exc}")
+        logger.exception("CSV read failed")
+        return
+
+    # -------------------------------------------
+    # Validate CSV columns before processing
+    # -------------------------------------------
+    is_valid, missing_required, missing_optional = _validate_csv_columns(df, dtype)
+    
+    if not is_valid:
+        error_msg = f"❌ **CSV Validation Failed for {dtype} data**\n\n"
+        error_msg += f"**Missing required columns:**\n"
+        for col in missing_required:
+            error_msg += f"- `{col}`\n"
+        
+        if missing_optional:
+            error_msg += f"\n**Missing optional columns** (will use defaults):\n"
+            for col in missing_optional:
+                error_msg += f"- `{col}`\n"
+        
+        error_msg += f"\n**Quick format reference:**\n"
+        error_msg += f"**New format:** `time_end`, `space_id`, `building_id`, `latitude`, `longitude`, plus measurements\n"
+        error_msg += f"**Legacy format:** `time_end`, `space_id`, plus measurements\n\n"
+        error_msg += f"**Your CSV columns:** `{', '.join(df.columns)}`\n\n"
+        error_msg += f"💡 See the **CSV Format Guide** above for detailed examples."
+        
+        st.sidebar.error(error_msg)
+        logger.exception(f"CSV validation failed for {dtype}: missing {missing_required}")
+        return
+    
+    # Show validation success message with summary
+    if missing_optional:
+        st.sidebar.info(f"✅ CSV validated successfully! Missing optional columns will use defaults: {', '.join(missing_optional)}")
+    else:
+        st.sidebar.success(f"✅ CSV validated successfully! All required and optional columns found.")
+    
+    # Show data summary
+    measurement_cols = [col for col in df.columns if col in [
+        "temperature_c", "energy_kwh", "co2_ppm", "rh_percent",
+        "luminance_lux", "average_noise_db", "pm2_5_ugm3", "tvoc_ppb",
+        "peak_db", "co_ppm", "pm10_ugm3"
+    ]]
+    
+    summary_msg = f"**Data Summary:**\n"
+    summary_msg += f"- Rows: {len(df):,}\n"
+    summary_msg += f"- Time range: {df['time_end'].min()} to {df['time_end'].max()}\n"
+    
+    if "space_id" in df.columns:
+        unique_spaces = df['space_id'].nunique()
+        summary_msg += f"- Unique spaces: {unique_spaces}\n"
+        if "building_id" in df.columns:
+            unique_buildings = df['building_id'].nunique()
+            summary_msg += f"- Unique buildings: {unique_buildings}\n"
+    elif "space_id" in df.columns:
+        unique_sensors = df['space_id'].nunique()
+        summary_msg += f"- Unique sensors: {unique_sensors}\n"
+    
+    summary_msg += f"- Measurement types: {', '.join(measurement_cols)}"
+    st.sidebar.info(summary_msg)
+
+    # -------------------------------------------
+    # Extract space and building information from CSV and ensure spaces exist
+    # -------------------------------------------
+    
+    # First, process spaces information - handle all possible cases
+    spaces_data = []
+    
+    # Check if we have space_id column (required for measurements)
+    if "space_id" in df.columns:
+        # Extract unique space_ids from the CSV
+        unique_space_ids = df["space_id"].dropna().unique()
+        
+        if len(unique_space_ids) == 0:
+            st.sidebar.error("❌ No valid space_id values found in CSV")
+            logger.exception("No valid space_id values found in CSV")
+            return
+        
+        with SessionLocal() as ses:
+            from db.models import Space
+            
+            for space_id in unique_space_ids:
+                # Check if space already exists
+                existing_space = ses.query(Space).filter(Space.space_id == space_id).first()
+                
+                if not existing_space:
+                    # Need to create new space - determine building_id, lat, lon
+                    if all(col in df.columns for col in ["building_id", "latitude", "longitude"]):
+                        # Get building info from CSV for this space
+                        space_info = df[df["space_id"] == space_id][["building_id", "latitude", "longitude"]].iloc[0]
+                        building_id = space_info["building_id"]
+                        latitude = float(space_info["latitude"])
+                        longitude = float(space_info["longitude"])
+                    else:
+                        # Use defaults or provided coordinates
+                        building_id = "default_building"
+                        latitude = lat if lat is not None else 40.6401  # Default: Thessaloniki
+                        longitude = lon if lon is not None else 22.9444
+                    
+                    # Create new space record
+                    new_space = Space(
+                        space_id=space_id,
+                        building_id=building_id,
+                        latitude=latitude,
+                        longitude=longitude
+                    )
+                    ses.add(new_space)
+                    spaces_data.append({
+                        'space_id': space_id,
+                        'building_id': building_id,
+                        'latitude': latitude,
+                        'longitude': longitude
+                    })
+                    logger.info(f"Created new space: {space_id} in building {building_id}")
+                else:
+                    # Space exists - optionally update coordinates if provided in CSV
+                    if all(col in df.columns for col in ["building_id", "latitude", "longitude"]):
+                        space_info = df[df["space_id"] == space_id][["building_id", "latitude", "longitude"]].iloc[0]
+                        existing_space.building_id = space_info["building_id"]
+                        existing_space.latitude = float(space_info["latitude"])
+                        existing_space.longitude = float(space_info["longitude"])
+                        logger.info(f"Updated existing space: {space_id}")
+            
+            ses.commit()
+            logger.debug(f"Processed {len(unique_space_ids)} unique spaces")
+    else:
+        st.sidebar.error("❌ CSV must contain 'space_id' or 'space_id' column")
+        logger.exception("CSV missing space_id/space_id column")
+        return
+
+    # -------------------------------------------
+    # keep only columns that really exist on measurements table
+    # and let PG fill defaults (time_stored, window_seconds, …)
+    # -------------------------------------------
+    allowed_cols = {
+        "time_end", "space_id", "data_type","time_stored", "window_seconds",
+        "temperature_c", "energy_kwh", "co2_ppm", "rh_percent",
+        "luminance_lux", "average_noise_db", "pm2_5_ugm3", "tvoc_ppb",
+        "peak_db", "co_ppm", "pm10_ugm3",
+    }
+    
+    df = df.reindex(columns=sorted(allowed_cols & set(df.columns)))         # drop the rest
+    df["data_type"] = dtype   
+    
+    # assign the datetime NOW
+    df["time_stored"] = datetime.now(tz=timezone.utc)
+
+    # NaN / NaT  ➜  None   (so they become SQL NULL)
+    df = df.where(pd.notna(df), None)
+
+    try:
+        with SessionLocal() as ses:
+            ses.bulk_insert_mappings(
+                Measurement,
+                df.to_dict("records"),
+                render_nulls=True          # keep NULLs, don't omit keys
+            )
+            ses.commit()
+        st.sidebar.success(f"Inserted {len(df)} {dtype} rows")
+        logger.info("Inserted %d %s rows", len(df), dtype)
+    except IntegrityError as ie:
+        if "unique" in str(ie.orig).lower():
+            st.sidebar.warning("Some rows already existed; duplicates ignored.")
+            logger.warning("Duplicate rows skipped during %s insert", dtype)
+        else:
+            st.sidebar.error(f"DB insert failed: {ie}")
+            logger.exception("Insert failed")
+
+    # now fetch weather data and add them to the Weather table
+    # Use coordinates from spaces data if available, otherwise use provided lat/lon
+    coords_to_fetch = []
+    
+    if spaces_data:
+        # Store the first building_id as current for session
+        st.session_state['current_building_id'] = spaces_data[0]['building_id']
+        logger.debug(f"Set current building_id in session: {spaces_data[0]['building_id']}")
+        
+        # Use unique coordinates from the spaces data
+        unique_coords = set((space['latitude'], space['longitude']) for space in spaces_data)
+        coords_to_fetch = list(unique_coords)
+    else:
+        # Fallback: get coordinates from database for existing spaces
+        with SessionLocal() as ses:
+            from db.models import Space
+            unique_space_ids = df["space_id"].dropna().unique()
+            spaces_from_db = ses.query(Space).filter(Space.space_id.in_(unique_space_ids)).all()
+            unique_coords = set((float(space.latitude), float(space.longitude)) for space in spaces_from_db)
+            coords_to_fetch = list(unique_coords)
+    
+    if coords_to_fetch:
+        # fetch weather data for each unique location
+        start = df["time_end"].min()
+        end = df["time_end"].max()
+        logger.info("Fetching weather data for %d locations from %s to %s", len(coords_to_fetch), start, end)
+        
+        # Process weather data for each unique location
+        with SessionLocal() as ses:
+            from db.models import Space
+            
+            for fetch_lat, fetch_lon in coords_to_fetch:
+                logger.info(f"Fetching weather data for location: {fetch_lat}, {fetch_lon}")
+                weather_df = fetch_open_meteo(lat=fetch_lat, lon=fetch_lon, start=start, end=end)
+                weather_df['fetched_at'] = datetime.now(tz=timezone.utc)
+                
+                # minor rename 'temperature_2m' to 'outdoor_temperature_2m'
+                # and          'relative_humidity_2m' to 'outdoor_relative_humidity_2m'
+                weather_df.rename(columns={
+                    "temperature_2m": "outdoor_temperature_2m",
+                    "relative_humidity_2m": "outdoor_relative_humidity_2m"
+                }, inplace=True)
+                
+                logger.info("Weather data fetched for location (%.4f, %.4f): %s", fetch_lat, fetch_lon, str(weather_df.shape))
+                
+                # Find all spaces at this location
+                spaces_at_location = ses.query(Space).filter(
+                    Space.latitude == fetch_lat,
+                    Space.longitude == fetch_lon
+                ).all()
+                
+                # Insert weather data for each space at this location
+                try:
+                    for space in spaces_at_location:
+                        if space.space_id in df["space_id"].unique():
+                            # Create weather data for this space
+                            weather_df_space = weather_df.copy()
+                            weather_df_space["space_id"] = space.space_id
+                            
+                            # if empty, skip this space_id
+                            if not weather_df_space.empty:
+                                # insert dataframe with session bulk insert mappings
+                                ses.bulk_insert_mappings(
+                                    Weather,
+                                    weather_df_space.to_dict("records"),
+                                    render_nulls=True  # keep NULLs, don't omit keys
+                                )
+                                logger.info("Inserted %d weather rows for space %s", len(weather_df_space), space.space_id)
+                    
+                    # Commit all weather data for this location
+                    ses.commit()
+                    
+                except Exception as exc:
+                    ses.rollback()
+                    st.sidebar.error(f"Weather data insert failed for location ({fetch_lat}, {fetch_lon}): {exc}")
+                    logger.exception("Weather data insert failed for location (%s, %s)", fetch_lat, fetch_lon)
+    else:
+        logger.info("No coordinates available for weather data fetching - skipping weather data")
+
+
+def _show_initialize_modal():
+    """Display the initialization modal for uploading CSV and IFC files."""
+    
+    # Create a modal-like container using st.container and custom styling
+    modal_container = st.container()
+    
+    with modal_container:
+        # Add some custom CSS for modal-like appearance
+        st.markdown("""
+        <style>
+        .modal-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+        }
+        .modal-content {
+            background-color: white;
+            margin: 5% auto;
+            padding: 20px;
+            border-radius: 10px;
+            width: 80%;
+            max-width: 600px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # Use columns to center the modal
+        col1, col2, col3 = st.columns([1, 3, 1])
+        
+        with col2:
+            st.markdown("### ⚙️ Configure Energy Comfortness Tool")
+            st.markdown("---")
+            
+            # Use a form to group all uploads
+            with st.form("initialize_form", clear_on_submit=False):
+                st.markdown("#### 📊 Training Data")
+                uploaded_csv = st.file_uploader(
+                    "Upload Training Data CSV", 
+                    type="csv",
+                    help="Upload CSV file containing measurement data for training",
+                    key="init_csv"
+                )
+                
+                # Add CSV format help
+                _show_csv_format_help()
+                
+                st.markdown("#### 🏢 Building Model")
+                uploaded_ifc = st.file_uploader(
+                    "Upload IFC Building Model", 
+                    type=['ifc'],
+                    help="Upload an IFC (Industry Foundation Classes) file for building simulation",
+                    key="init_ifc"
+                )
+                
+                # Submit button
+                submit_full = st.form_submit_button("🚀 Submit", type="primary", 
+                                                  help="Upload CSV and/or IFC files")
+            
+            # Handle form submission outside the form
+            if submit_full:
+                if uploaded_csv and uploaded_ifc:
+                    # Both files uploaded - full initialization
+                    _handle_initialization(uploaded_csv, uploaded_ifc)
+                elif uploaded_csv and not uploaded_ifc:
+                    # Only CSV uploaded
+                    _handle_csv_upload(uploaded_csv)
+                elif uploaded_ifc and not uploaded_csv:
+                    # Only IFC uploaded - handle IFC file
+                    _handle_ifc_upload(uploaded_ifc)
+                else:
+                    # No files uploaded
+                    st.error("Please upload at least one file (CSV for training data or IFC for building model).")
+            
+            # Cancel button outside form
+            if st.button("❌ Cancel", key="cancel_init"):
+                st.session_state['show_initialize_modal'] = False
+                st.rerun()
+
+
+def _handle_initialization(csv_file, ifc_file):
+    """Handle the full initialization with both CSV and IFC files."""
+    errors = []
+    
+    # Validate inputs
+    if csv_file is None:
+        errors.append("Please upload a CSV file")
+    # if ifc_file is None:  # is fine for user to not upload an IFC
+    #     errors.append("Please upload an IFC file")
+    
+    if errors:
+        for error in errors:
+            st.error(error)
+        return
+    
+    try:
+        # Process CSV file
+        st.info("🔄 Processing training data...")
+        _insert_csv(csv_file, "train")
+        
+        # Store IFC file
+        st.info("🔄 Storing building model...")
+        models_dir = Path("./eplus_sim/models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save IFC file with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ifc_filename = f"building_model_{timestamp}.ifc"
+        ifc_path = models_dir / ifc_filename
+        
+        with open(ifc_path, "wb") as f:
+            f.write(ifc_file.getbuffer())
+        
+        # Clear cache and close modal
+        st.cache_data.clear()
+        st.session_state['show_initialize_modal'] = False
+        st.session_state['latest_ifc_path'] = str(ifc_path)
+        
+        st.success(f"✅ Initialization complete! CSV processed and IFC file saved as {ifc_filename}")
+        logger.info(f"Initialization completed: CSV processed, IFC saved to {ifc_path}")
+        
+        # Rerun to update the interface
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"❌ Initialization failed: {str(e)}")
+        logger.exception(f"Initialization failed: {str(e)}", exc_info=True)
+
+
+def _handle_csv_upload(csv_file):
+    """Handle CSV-only upload."""
+    try:
+        st.info("🔄 Processing training data...")
+        _insert_csv(csv_file, "train")
+        
+        # Clear cache and close modal
+        st.cache_data.clear()
+        st.session_state['show_initialize_modal'] = False
+        
+        st.success("✅ Training data uploaded successfully!")
+        logger.info("CSV upload completed successfully")
+        
+        # Rerun to update the interface
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"❌ CSV upload failed: {str(e)}")
+        logger.exception(f"CSV upload failed: {str(e)}", exc_info=True)
+
+
+def _handle_ifc_upload(ifc_file):
+    """Handle IFC file upload only."""
+    try:
+        if ifc_file is None:
+            st.error("❌ No IFC file provided")
+            return
+        
+        # Save IFC file
+        models_dir = Path("./eplus_sim/models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ifc_filename = f"uploaded_{timestamp}.ifc"
+        ifc_path = models_dir / ifc_filename
+        
+        with open(ifc_path, "wb") as f:
+            f.write(ifc_file.getbuffer())
+        
+        # Store in session state
+        st.session_state['latest_ifc_path'] = str(ifc_path)
+        st.session_state['uploaded_ifc_path'] = str(ifc_path)
+        
+        # Show success message
+        file_size_mb = len(ifc_file.getbuffer()) / (1024 * 1024)
+        st.success(f"✅ **IFC file uploaded successfully!**")
+        st.info(f"📄 **File:** {ifc_file.name} ({file_size_mb:.1f} MB)")
+        st.info(f"💾 **Saved as:** {ifc_filename}")
+        
+        # Close modal
+        st.session_state['show_initialize_modal'] = False
+        
+        logger.info(f"IFC file uploaded successfully: {ifc_path} ({file_size_mb:.1f} MB)")
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"❌ IFC upload failed: {str(e)}")
+        logger.exception(f"IFC upload failed: {str(e)}", exc_info=True)
+
 
 # ---------------------------------------------------------------------------
 # Sidebar – uploads, training, prediction
@@ -2237,137 +2882,81 @@ if 'performance_optimizations_applied' not in st.session_state:
     st.session_state['performance_optimizations_applied'] = True
     logger.info("Applied Streamlit performance optimizations for large datasets")
 
-# ECT Logo at top of sidebar
-if ECT_LOGO.exists():
-    st.sidebar.image(str(ECT_LOGO), width=120)
-else:
-    st.sidebar.markdown("###  Energy Comfortness Tool")
+# ECT Logo at top of sidebar - centered
+if ECT_LOGO.exists() and LOGO.exists():
+    col1, col2, col3 = st.sidebar.columns([1, 2, 1], vertical_alignment="center", )
+    with col2:
+        # Create two sub-columns for the logos within the centered column
+        logo_col1, logo_col2 = st.columns(2, vertical_alignment="center")
+        with logo_col1:
+            st.image(str(ECT_LOGO), width=400)
+        with logo_col2:
+            st.image(str(LOGO), width=400)
 
-lat = st.sidebar.number_input("Latitude",  -90.0, 90.0,  40.6401, format="%.4f")
-lon = st.sidebar.number_input("Longitude", -180.0, 180.0, 22.9444, format="%.4f")
 
-# dashboard/app.py  – in _insert_csv()
-def _insert_csv(file: bytes, dtype: str, lat: float | None = None, lon: float | None = None):
-    try:
-        df = pd.read_csv(file, parse_dates=["time_end", "time_stored"])
-    except Exception as exc:
-        st.sidebar.error(f"Could not read CSV: {exc}")
-        logger.exception("CSV read failed")
-        return
+# Initialize button - Create popup for data upload
+if st.sidebar.button("⚙️ Configure", help="Upload CSV data and IFC file to configure the system", type="primary"):
+    st.session_state['show_initialize_modal'] = True
 
-    # -------------------------------------------
-    # keep only columns that really exist on measurements table
-    # and let PG fill defaults (time_stored, window_seconds, …)
-    # -------------------------------------------
-    allowed_cols = {
-        "time_end", "sensor_id", "data_type","time_stored", "window_seconds",
-        "temperature_c", "energy_kwh", "co2_ppm", "rh_percent",
-        "luminance_lux", "average_noise_db", "pm2_5_ugm3", "tvoc_ppb",
-        "peak_db", "co_ppm", "pm10_ugm3",
-    }
-    df = df.reindex(columns=sorted(allowed_cols & set(df.columns)))         # drop the rest
-    df["data_type"] = dtype   
-    
-    # assign the datetime NOW
-    df["time_stored"] = datetime.now(tz=timezone.utc)
+# Initialize Modal Dialog
+if st.session_state.get('show_initialize_modal', False):
+    _show_initialize_modal()
+    st.stop()  # Stop execution here to prevent showing the rest of the app
 
-    # NaN / NaT  ➜  None   (so they become SQL NULL)
-    df = df.where(pd.notna(df), None)
+# Dynamic date limits based on when the application is run
+CURRENT_DATE = datetime.now(tz=timezone.utc)   # Current date when app is run
+TIME_BEFORE_LIMIT = timedelta(days=365 * 2)    # 2 years before current date
+TIME_AFTER_LIMIT = timedelta(days=14)          # 14 days after current date
 
-    try:
-        with SessionLocal() as ses:
-            ses.bulk_insert_mappings(
-                Measurement,
-                df.to_dict("records"),
-                render_nulls=True          # keep NULLs, don’t omit keys
-            )
-            ses.commit()
-        st.sidebar.success(f"Inserted {len(df)} {dtype} rows")
-        logger.info("Inserted %d %s rows", len(df), dtype)
-    except IntegrityError as ie:
-        if "unique" in str(ie.orig).lower():
-            st.sidebar.warning("Some rows already existed; duplicates ignored.")
-            logger.warning("Duplicate rows skipped during %s insert", dtype)
-        else:
-            st.sidebar.error(f"DB insert failed: {ie}")
-            logger.exception("Insert failed")
-
-    # now fetch weather data and add them to the Weather table
-    if lat is not None and lon is not None:
-        # fetch weather data for the last 6 months
-        start = df["time_end"].min()
-        end = df["time_end"].max()
-        logger.info("Fetching weather data for %s to %s", start, end)
-        weather_df = fetch_open_meteo(lat=lat, lon=lon, start=start, end=end)
-        weather_df['fetched_at'] = datetime.now(tz=timezone.utc)
-        # minor rename 'temperature_2m' to 'outdoor_temperature_2m'
-        # and          'relative_humidity_2m' to 'outdoor_relative_humidity_2m'
-        weather_df.rename(columns={
-            "temperature_2m": "outdoor_temperature_2m",
-            "relative_humidity_2m": "outdoor_relative_humidity_2m"
-        }, inplace=True)
-        logger.info("Weather data fetched: %s" % str(weather_df.shape))
-        logger.info("Fetched columns: %s" % str(weather_df.columns))
-        try:
-            with SessionLocal() as ses:
-                # iterate over all unique `sensor_id` values in the dataframe
-                # and store weather data for each of them
-                for sensor_id in df["sensor_id"].unique():
-                    if sensor_id is None:
-                        continue
-                    # filter weather_df for this sensor_id
-                    weather_df_sensor = weather_df.copy()
-                    weather_df_sensor["sensor_id"] = sensor_id
-                    # keep only the columns that match the Weather model
-                    # weather_df_sensor = weather_df_sensor[Weather.__table__.columns.keys()]
-                    # weather_df_sensor.drop('weather_id', axis=1, inplace=True, errors='ignore')
-                    
-                    # if empty, skip this sensor_id
-                    if not weather_df.empty:
-                        # insert dataframe with session bulk insert mappings
-                        ses.bulk_insert_mappings(
-                            Weather,
-                            weather_df_sensor.to_dict("records"),
-                            render_nulls=True  # keep NULLs, don’t omit keys
-                        )
-                        ses.commit()
-                        logger.info("Inserted %d weather rows", len(weather_df))
-        except Exception as exc:
-            st.sidebar.error(f"Weather data insert failed: {exc}")
-            logger.exception("Weather data insert failed")
-
-# _insert_csv(train_csv, "train", lat=lat, lon=lon)
-train_csv = st.sidebar.file_uploader("Training Data CSV", type="csv")
-if train_csv and st.sidebar.button("Insert training rows"):
-    _insert_csv(train_csv,  "train", lat=lat, lon=lon)
-    st.cache_data.clear()
-
-# date-range button
-TODAY = datetime.now(tz=timezone.utc)
-TIME_BEFORE_API = timedelta(days=365 * 2)
-TIME_AFTER_API = timedelta(days=15)
-
-min_limit   = TODAY - TIME_BEFORE_API          # earliest selectable
-max_limit   = TODAY + TIME_AFTER_API          # latest selectable
+min_limit = CURRENT_DATE - TIME_BEFORE_LIMIT   # earliest selectable (2 years before current date)
+max_limit = CURRENT_DATE + TIME_AFTER_LIMIT    # latest selectable (14 days from current date)
 
 DEFAULT_START = date(2025, 6, 15)
 DEFAULT_END   = date(2025, 7, 15)
 
-st.sidebar.markdown("### Time window")
+# Time window in expandable section
+with st.sidebar.expander("📅 Time Window", expanded=False):
+    start = st.date_input(
+        "Start",
+        value=DEFAULT_START,
+        min_value=min_limit.date(),
+        max_value=max_limit.date(),
+        help=f"Select start date (allowed range: {min_limit.date()} to {max_limit.date()})\nDynamic limits: 2 years before to 14 days after current date"
+    )
 
-start = st.sidebar.date_input(
-    "Start",
-    value=DEFAULT_START,
-    min_value=min_limit.date(),
-    max_value=max_limit.date()
-)
-
-end = st.sidebar.date_input(
-    "End",
-    value=DEFAULT_END,
-    min_value=min_limit.date(),
-    max_value=max_limit.date()
-)
+    end = st.date_input(
+        "End",
+        value=DEFAULT_END,
+        min_value=min_limit.date(),
+        max_value=max_limit.date(),
+        help=f"Select end date (allowed range: {min_limit.date()} to {max_limit.date()})\nDynamic limits: 2 years before to 14 days after current date"
+    )
+    
+    # Show current date and dynamic limits info
+    st.caption(f"📅 Current date: {CURRENT_DATE.date()} | Valid range: {min_limit.date()} to {max_limit.date()}")
+    
+    # Date validation: Check if start date is after end date
+    if start > end:
+        st.error("⚠️ **Invalid date range**: Start date cannot be later than end date. Please adjust your selection.")
+        st.info(f"📅 Current selection: {start} to {end}")
+        # Reset to valid default dates if user has invalid selection
+        if st.button("🔄 Reset to Default Dates"):
+            st.session_state['reset_dates'] = True
+            st.rerun()
+    else:
+        # Show current valid selection
+        if start != end:
+            days_diff = (end - start).days
+            st.success(f"✅ Valid time window: {days_diff + 1} days selected ({start} to {end})")
+        else:
+            st.info(f"📅 Single day selected: {start}")
+    
+    # Handle date reset if requested
+    if st.session_state.get('reset_dates', False):
+        start = DEFAULT_START
+        end = DEFAULT_END
+        st.session_state['reset_dates'] = False
+        st.rerun()
 
 start_dt = pd.to_datetime(start)
 end_dt = pd.to_datetime(end)
@@ -2383,37 +2972,56 @@ st.session_state['end_dt'] = end_dt
 #     st.cache_data.clear()
 
     
-sensor_ids = _get_sensor_ids()
-if sensor_ids:
-    selected_sensor = st.sidebar.selectbox(
-        "Selected space", sensor_ids, key="sensor_filter"
+# Building and space selection
+building_options = _get_building_ids()
+if building_options:
+    selected_building = st.sidebar.selectbox(
+        "Selected building", building_options, key="building_filter"
+    )
+else:
+    st.sidebar.warning("⚠️ No buildings available. Please upload data first.")
+    selected_building = None
+
+# Space selection (filtered by building)
+space_options = _get_space_ids(selected_building if building_options else None)
+if space_options:
+    selected_space = st.sidebar.selectbox(
+        "Selected space", space_options, key="space_filter"
     )
 else:
     st.sidebar.warning("⚠️ No spaces available. Please upload training data first.")
-    selected_sensor = None
+    selected_space = None
+
+# Keep legacy variable name for compatibility
+selected_sensor = selected_space
 
 # occupant profile ----------------------------------------------------------
+
+
+# Profile details in an expander
 profiles = pd.read_csv(PROFILES)
-prof_id = st.sidebar.selectbox("Occupant profile", profiles["occupant_profile_id"])
-prof    = profiles.set_index("occupant_profile_id").loc[prof_id]
+with st.sidebar.expander("👤 Profile Details", expanded=False):
+    prof_id = st.selectbox("Occupant profile", profiles["occupant_profile_id"])
+    prof    = profiles.set_index("occupant_profile_id").loc[prof_id]
+    
+    # Store selected profile in session state
+    st.session_state["occupant_profile"] = prof_id
 
-A_m2   = get_human_surf_area(prof["weight_kg"], prof["height_cm"])
-BMR_W  = basal_metabolic_rate(prof)
-BMR_kcal = BMR_W / 0.048425
-M_Wm2  = metabolic_rate_fanger(BMR_W, A_m2)
-M_met  = wm2_to_met(M_Wm2)
-
-
-st.sidebar.markdown(
-    f"""**Profile details**  
-• Age: **{prof['age']}**  
-• Gender: {prof['gender']}  
-• Weight: **{prof['weight_kg']} kg**  
-• Height: **{prof['height_cm']} cm**  
-• *BMR*: **{BMR_kcal:,.0f} kcal/day**  
-• *M*: **{M_Wm2:.1f} W m⁻²**  ≈  **{M_met:.2f} met**  
-• *Visual Impairment*: **{prof['visual_impairment']}**"""
-)
+    A_m2   = get_human_surf_area(prof["weight_kg"], prof["height_cm"])
+    BMR_W  = basal_metabolic_rate(prof)
+    BMR_kcal = BMR_W / 0.048425
+    M_Wm2  = metabolic_rate_fanger(BMR_W, A_m2)
+    M_met  = wm2_to_met(M_Wm2)
+    st.markdown(
+        f"""**Profile details**  
+- Age: **{prof['age']}**  
+- Gender: {prof['gender']}  
+- Weight: **{prof['weight_kg']} kg**  
+- Height: **{prof['height_cm']} cm**  
+- *BMR*: **{BMR_kcal:.0f} kcal/day**  
+- *M*: **{M_Wm2:.1f} W m⁻²**  ≈  **{M_met:.2f} met**  
+- *Visual Impairment*: **{prof['visual_impairment']}**"""
+    )
 
 # st.sidebar.markdown("---")
 
@@ -2428,7 +3036,7 @@ def _train():
     with st.spinner("Training models …"):
         main_train_all_targets()
     st.session_state["training"] = False
-    st.sidebar.success("Training complete")
+    st.sidebar.success("🎉 Model training complete! Ready for simulation.")
 
 
 def _calculate_comfort_on_the_fly(comfort_data: pd.DataFrame, selected_profile: str, age: int = None) -> pd.DataFrame:
@@ -2482,7 +3090,7 @@ def _calculate_comfort_on_the_fly(comfort_data: pd.DataFrame, selected_profile: 
         logger.info(f"Recalculated comfort metrics for profile '{selected_profile}' (age {age})")
         
     except Exception as e:
-        logger.error(f"Error calculating comfort on-the-fly for profile {selected_profile}: {e}")
+        logger.exception(f"Error calculating comfort on-the-fly for profile {selected_profile}: {e}")
     
     return comfort_data_updated
 
@@ -2530,7 +3138,7 @@ def _calculate_comfort_for_profile(prediction_data: dict, profile: dict) -> dict
                 comfort_data['thermal_comfort_class'] = str(thermal_class[0])
                 
         except Exception as e:
-            logger.warning(f"Error calculating thermal comfort for profile {profile['name']}: {e}")
+            logger.warning(f"Error calculating thermal comfort for profile {profile.get('name', 'unknown')}: {e}")
     
     # Visual comfort - independent of age
     if prediction_data.get('luminance_lux') is not None:
@@ -2547,7 +3155,7 @@ def _calculate_comfort_for_profile(prediction_data: dict, profile: dict) -> dict
             comfort_data['visual_comfort_class'] = str(visual_class[0])
             
         except Exception as e:
-            logger.warning(f"Error calculating visual comfort for profile {profile['name']}: {e}")
+            logger.warning(f"Error calculating visual comfort for profile {profile.get('name', 'unknown')}: {e}")
     
     # Acoustic comfort - age-dependent
     if prediction_data.get('average_noise_db') is not None:
@@ -2565,7 +3173,7 @@ def _calculate_comfort_for_profile(prediction_data: dict, profile: dict) -> dict
             comfort_data['acoustic_comfort_class'] = str(acoustic_class[0])
             
         except Exception as e:
-            logger.warning(f"Error calculating acoustic comfort for profile {profile['name']}: {e}")
+            logger.warning(f"Error calculating acoustic comfort for profile {profile.get('name', 'unknown')}: {e}")
     
     # Air quality comfort classes - independent of age
     comfort_mappings = [
@@ -2587,7 +3195,7 @@ def _calculate_comfort_for_profile(prediction_data: dict, profile: dict) -> dict
                 comfort_data[f'predicted_{pred_key}'] = value
                 
             except Exception as e:
-                logger.warning(f"Error calculating {comfort_key} for profile {profile['name']}: {e}")
+                logger.warning(f"Error calculating {comfort_key} for profile {profile.get('name', 'unknown')}: {e}")
     
     # Calculate overall comfort score (weighted average)
     # This is a simplified approach - you might want to implement a more sophisticated weighting
@@ -2633,315 +3241,339 @@ def _calculate_comfort_for_profile(prediction_data: dict, profile: dict) -> dict
             comfort_data['overall_comfort_class'] = overall_class
             
     except Exception as e:
-        logger.warning(f"Error calculating overall comfort for profile {profile['name']}: {e}")
+        logger.warning(f"Error calculating overall comfort for profile {profile.get('name', 'unknown')}: {e}")
     
     return comfort_data
 
 
 def _predict():
-    """Run latest models on inference rows, store results with comfort data in DB, update session."""
+    """Generate predictions by downloading weather data for the selected period and running models."""
     st.session_state["predicted"] = False
-    logger.info("Prediction trigger clicked")
+    logger.info("Simulation trigger clicked")
+    
+    try:
+        import pandas as pd
+        import joblib
+        import numpy as np
+        from pathlib import Path
+        from datetime import datetime, timezone
+        
+        with st.spinner("Running simulation …"):
+            logger.info("Starting simulation process...")
+            
+            # Get time range and space from sidebar
+            start_dt = st.session_state.get('start_dt')
+            end_dt = st.session_state.get('end_dt')
+            selected_space = st.session_state.get('space_filter')
+            
+            if not start_dt or not end_dt:
+                st.sidebar.error("❌ Please select a time range in the sidebar.")
+                logger.exception("No time range selected")
+                return
+                
+            # Convert to datetime if needed
+            if not isinstance(start_dt, datetime):
+                start_dt = pd.to_datetime(start_dt)
+            if not isinstance(end_dt, datetime):
+                end_dt = pd.to_datetime(end_dt)
+            
+            # First check if we have trained models
+            models_dir = Path("../models")
+            if not models_dir.exists():
+                st.sidebar.error("❌ No models directory found. Please train models first.")
+                logger.exception("Models directory does not exist")
+                return
+            
+            with SessionLocal() as ses:
+                from db.models import TrainedModel, Space, Weather
+                from ece.feature_map import MAP as FEATURE_MAP, TIME_DRIVERS
+                from ece.pipeline_weather import ensure_complete_weather_data
+                
+                # Check for trained models
+                trained_models = ses.query(TrainedModel).all()
+                if not trained_models:
+                    st.sidebar.error("❌ No trained models found. Please train models first.")
+                    logger.exception("No trained models in database")
+                    return
+                
+                logger.info(f"Found {len(trained_models)} trained models")
+                
+                # Get spaces to predict for
+                if selected_space:
+                    spaces = ses.query(Space).filter(Space.space_id == selected_space).all()
+                else:
+                    spaces = ses.query(Space).all()
+                
+                if not spaces:
+                    st.sidebar.error("❌ No spaces found. Please upload data first.")
+                    logger.exception("No spaces found in database")
+                    return
+                
+                logger.info(f"Generating predictions for {len(spaces)} space(s)")
+                
+                # Download weather data for each space for the specified period
+                weather_progress = st.empty()
+                weather_progress.info("🌤️ Downloading weather data for the selected period...")
+                for space in spaces:
+                    logger.info(f"Ensuring weather data for space {space.space_id} ({space.latitude}, {space.longitude})")
+                    try:
+                        ensure_complete_weather_data(
+                            space_id=space.space_id,
+                            latitude=space.latitude,
+                            longitude=space.longitude,
+                            start=start_dt,
+                            end=end_dt
+                        )
+                    except Exception as e:
+                        logger.exception(f"Failed to download weather data for space {space.space_id}: {e}")
+                        st.sidebar.warning(f"⚠️ Failed to download weather data for space {space.space_id}")
+                        continue
+                
+                # Clear weather progress message
+                weather_progress.empty()
+                
+                # Now fetch the weather data we just downloaded/ensured
+                prediction_progress = st.empty()
+                prediction_progress.info("🔮 Running prediction models...")
+                query = ses.query(Weather).filter(
+                    Weather.time_end >= start_dt,
+                    Weather.time_end <= end_dt
+                )
+                
+                if selected_space:
+                    query = query.filter(Weather.space_id == selected_space)
+                
+                weather_results = query.order_by(Weather.time_end).all()
+                
+                if not weather_results:
+                    st.sidebar.error("❌ No weather data available for the selected period and space(s).")
+                    logger.exception("No weather data found after download attempt")
+                    return
+                
+                logger.info(f"Found {len(weather_results)} weather records for prediction")
+                
+                # Convert weather data to DataFrame for predictions
+                weather_data = []
+                for weather in weather_results:
+                    row = {
+                        'time_end': weather.time_end,
+                        'space_id': weather.space_id,
+                        # Weather features for prediction input
+                        'outdoor_temperature_2m': weather.outdoor_temperature_2m,
+                        'outdoor_relative_humidity_2m': weather.outdoor_relative_humidity_2m,
+                        'wind_speed_10m': weather.wind_speed_10m,
+                        'shortwave_radiation': weather.shortwave_radiation or 0,
+                        'direct_radiation': weather.direct_radiation or 0,
+                        'precipitation': weather.precipitation or 0,
+                        'cloud_cover': weather.cloud_cover or 0,
+                    }
+                    weather_data.append(row)
+                
+                df_base = pd.DataFrame(weather_data)
+                df_base = df_base.sort_values(['space_id', 'time_end'])
+                
+                # Generate predictions for each target using trained models
+                predictions = {}
+                
+                for model_record in trained_models:
+                    target = model_record.target
+                    model_path = Path(model_record.model_path)
+                    
+                    if not model_path.exists():
+                        logger.warning(f"Model file not found: {model_path}")
+                        continue
+                    
+                    try:
+                        # Load the trained model
+                        model_data = joblib.load(model_path)
+                        model = model_data['model']
+                        features = model_data['features']
+                        
+                        # Prepare feature data (add derived features)
+                        df_features = _add_derived_features_for_prediction(df_base.copy(), features)
+                        
+                        # Check which features are available for this model
+                        available_features = []
+                        missing_features = []
+                        
+                        for f in features:
+                            if f in TIME_DRIVERS:
+                                # Time features are generated automatically
+                                available_features.append(f)
+                            elif f in df_features.columns:
+                                available_features.append(f)
+                            else:
+                                missing_features.append(f)
+                        
+                        if missing_features:
+                            logger.warning(f"Missing features for {target}: {missing_features}")
+                        
+                        if len(available_features) < len(features) * 0.5:  # Need at least 50% of features
+                            logger.warning(f"Too many missing features for {target} ({len(missing_features)}/{len(features)})")
+                            continue
+                        
+                        # Make predictions using available features
+                        X = df_features[available_features].fillna(0)  # Fill NaN with reasonable defaults
+                        if len(X) > 0:
+                            y_pred = model.predict(X)
+                            predictions[f'pred_{target}'] = y_pred
+                            logger.info(f"Generated {len(y_pred)} predictions for {target} using {len(available_features)}/{len(features)} features")
+                        
+                    except Exception as e:
+                        logger.exception(f"Error predicting {target}: {e}")
+                        continue
+                
+                if not predictions:
+                    st.sidebar.error("❌ Failed to generate any predictions. Check model files and features.")
+                    logger.exception("No predictions generated")
+                    return
+                
+                # Create prediction DataFrame
+                df_pred = df_base[['time_end', 'space_id']].copy()
+                for pred_col, pred_values in predictions.items():
+                    df_pred[pred_col] = pred_values
+                
+                # Add comfort analysis using the selected occupant profile
+                profile_id = st.session_state.get('occupant_profile', 'Profile1')
+                profiles = pd.read_csv(PROFILES)
+                prof = profiles.set_index("occupant_profile_id").loc[profile_id]
+                
+                # Calculate comfort metrics
+                df_pred = _add_comfort_cols(df_pred, prof)
+                
+                # Store results in session state
+                st.session_state["pred_df"] = df_pred
+                st.session_state["predicted"] = True
+                
+                # Clear prediction progress message
+                prediction_progress.empty()
+                
+                logger.info(f"Simulation completed successfully with {len(df_pred)} predictions")
+                st.sidebar.success(f"🎯 Simulation complete! Generated {len(df_pred)} predictions with comfort analysis.")
+                
+    except Exception as e:
+        logger.exception(f"Error during simulation: {e}")
+        # Clear any progress messages on error
+        try:
+            prediction_progress.empty()
+        except:
+            pass
+        st.sidebar.error(f"❌ Simulation failed: {str(e)}")
+        st.session_state["pred_df"] = pd.DataFrame()
+        st.session_state["predicted"] = False
 
+
+def _add_derived_features_for_prediction(df: pd.DataFrame, feats: list) -> pd.DataFrame:
+    """Add derived features for prediction (simplified version of pipeline_ml function)."""
+    import math
     import re
-
+    
+    df = df.copy()
+    
+    # Regex for derived features
     _DERIV_RE = re.compile(r"^(?P<base>.+)_(?P<agg>mean|std|max|min)_(?P<win>\d+)h$")
     _AGG_FUN = {"mean": "mean", "std": "std", "max": "max", "min": "min"}
-
-    with SessionLocal() as ses:
-        # ---- load models + resolve model_id per target ----
-        models: dict[str, tuple[dict,int]] = {}
-        for row in (
-            ses.query(TrainedModel)
-               .order_by(TrainedModel.target, TrainedModel.train_finished.desc())
-               .all()
-        ):
-            if row.target not in models:  # keep latest per target
-                p = Path(row.model_path)
-                if p.exists():
-                    models[row.target] = (joblib.load(p), row.model_id)
-        logger.info("Loaded models for targets: %s", ", ".join(models.keys()))
-        if not models:
-            st.sidebar.warning("No trained models in DB; train first.")
-            return
-
-        # ---- Generate expected timestamps for the date range ----
-        # Create hourly timestamps between start_dt and end_dt
-        expected_timestamps = pd.date_range(
-            start=start_dt,
-            end=end_dt,
-            freq='h'  # Use lowercase 'h' instead of deprecated 'H'
-        )
+    
+    # Rolling window features
+    for f in feats:
+        if f in df.columns or f in TIME_DRIVERS:
+            continue
+        m = _DERIV_RE.match(f)
+        if not m:
+            continue
+        base, agg, win = m.group("base"), m.group("agg"), int(m.group("win"))
         
-        # ---- Check which weather data is missing ----
-        existing_weather_times = set()
-        if selected_sensor:
-            for sensor_id in [selected_sensor]:
-                existing_rows = (
-                    ses.query(Weather.time_end)
-                    .filter(
-                        Weather.time_end.between(start_dt, end_dt),
-                        Weather.sensor_id == sensor_id
-                    )
-                    .all()
-                )
-                existing_weather_times.update(row[0] for row in existing_rows)
-        
-        missing_timestamps = set(expected_timestamps) - existing_weather_times
-        
-        if missing_timestamps:
-            logger.info("Missing weather data for %d timestamps. Fetching...", len(missing_timestamps))
-            with st.spinner("Fetching missing weather data for predictions..."):
-                # Fetch weather data for the entire date range
-                # Convert to timezone-aware timestamps for the API call
-                start_utc = pd.Timestamp(start_dt).tz_localize('UTC')
-                end_utc = pd.Timestamp(end_dt).tz_localize('UTC')
-                
-                weather_df = fetch_open_meteo(lat=lat, lon=lon, start=start_utc, end=end_utc)
-                weather_df['fetched_at'] = datetime.now(tz=timezone.utc)
-                weather_df.rename(columns={
-                    "temperature_2m": "outdoor_temperature_2m",
-                    "relative_humidity_2m": "outdoor_relative_humidity_2m"
-                }, inplace=True)
-                
-                # Insert weather data for selected sensor(s)
-                if selected_sensor:
-                    sensor_list = [selected_sensor]
-                    for sensor_id in sensor_list:
-                        # Filter weather data to only missing timestamps
-                        weather_df_filtered = weather_df[
-                            weather_df['time_end'].isin(missing_timestamps)
-                        ].copy()
-                        
-                        if not weather_df_filtered.empty:
-                            weather_df_filtered["sensor_id"] = sensor_id
-                            ses.bulk_insert_mappings(
-                                Weather,
-                                weather_df_filtered.to_dict("records"),
-                                render_nulls=True
-                            )
-                            logger.info("Inserted %d weather rows for sensor %s", 
-                                      len(weather_df_filtered), sensor_id)
-                
-                ses.commit()
-                logger.info("Completed fetching missing weather data")
-
-        # ---- fetch inference measurements (now should have complete weather data) ----
-        rows = (
-                ses.query(Weather)
-            .filter(Weather.time_end.between(start_dt, end_dt))
-            .all()
-        )
-        if not rows:
-            st.sidebar.warning("No inference rows.")
-            return
-
-        # Convert Decimal objects to float to avoid PyArrow serialization issues
-        df = pd.DataFrame([{c.name: _convert_decimal_to_float(getattr(r, c.name)) for c in r.__table__.columns} for r in rows])
-        # coerce numeric but keep sensor_id untouched
-        obj_cols = df.select_dtypes("object").columns.difference(["sensor_id"])        
-        for col in obj_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        if st.session_state.get("sensor_filter") is not None:
-            df = df[df["sensor_id"] == st.session_state["sensor_filter"]]
-            logger.info("Filtered data for space '%s' ", st.session_state["sensor_filter"])
-
-        # time drivers
+        if base not in df.columns:
+            continue
+            
+        try:
+            rolled = (
+                df.set_index("time_end")
+                  .groupby("space_id")[base]
+                  .rolling(f"{win}h", min_periods=1)
+                  .agg(_AGG_FUN[agg])
+                  .reset_index(level=0, drop=True)
+            )
+            df[f] = rolled.values
+        except Exception as e:
+            logger.warning(f"Failed to create derived feature {f}: {e}")
+            continue
+    
+    # Time harmonic features
+    if any(td in feats for td in TIME_DRIVERS):
         doy = df["time_end"].dt.dayofyear
         hod = df["time_end"].dt.hour + df["time_end"].dt.minute / 60
-        df["doy_sin"] = np.sin(2 * math.pi * doy / 365)
-        df["doy_cos"] = np.cos(2 * math.pi * doy / 365)
-        df["hour_sin"] = np.sin(2 * math.pi * hod / 24)
-        df["hour_cos"] = np.cos(2 * math.pi * hod / 24)
+        if "doy_sin" in feats:
+            df["doy_sin"] = np.sin(2 * math.pi * doy / 365)
+        if "doy_cos" in feats:
+            df["doy_cos"] = np.cos(2 * math.pi * doy / 365)
+        if "hour_sin" in feats:
+            df["hour_sin"] = np.sin(2 * math.pi * hod / 24)
+        if "hour_cos" in feats:
+            df["hour_cos"] = np.cos(2 * math.pi * hod / 24)
+    
+    return df
 
-        roll_cache: dict[tuple[str,int,str], pd.Series] = {}
-        target_predictions: dict[int, dict] = {}  # weather_id -> prediction data
-        skipped: list[str] = []
-        done: list[str] = []
 
-        now = datetime.now(tz=timezone.utc)  # Fix deprecated datetime.utcnow()
-        
-        # Initialize prediction records for each weather_id
-        for weather_id in df["weather_id"]:
-            target_predictions[int(weather_id)] = {
-                "model_id": None,  # Will use the first model's ID
-                "weather_id": int(weather_id),
-                "predicted_at": now,
-                "occupant_profile": prof_id,  # Add occupant profile to predictions
-            }
-        
-        for tgt, (bundle, model_id) in models.items():
-            model, feats = bundle["model"], bundle["features"]
-            
-            # Set model_id for all predictions (use first model encountered)
-            if all(pred["model_id"] is None for pred in target_predictions.values()):
-                for pred in target_predictions.values():
-                    pred["model_id"] = model_id
-            
-            # derive missing rolling feats
-            for f in feats:
-                if f in df.columns or f in TIME_DRIVERS:
-                    continue
-                m = _DERIV_RE.match(f)
-                if not m:
-                    continue
-                base, agg, win = m.group("base"), m.group("agg"), int(m.group("win"))
-                if base not in df.columns:
-                    continue
-                key = (base, win, agg)
-                if key not in roll_cache:
-                    try:
-                        rolled = (
-                            df.set_index("time_end").groupby("sensor_id")[base]
-                            .rolling(f"{win}h", min_periods=1).agg(_AGG_FUN[agg])
-                            .reset_index(level=0, drop=True)
-                        )
-                        roll_cache[key] = rolled
-                    except ValueError:
-                        roll_cache[key] = pd.Series([float("nan")] * len(df))
-                df[f] = roll_cache[key].values
-
-            if any(f not in df.columns for f in feats):
-                skipped.append(tgt)
-                continue
-            preds = model.predict(df[feats])
-            df[f"pred_{tgt}"] = preds
-            done.append(tgt)
-
-            # Add predictions to the consolidated prediction records
-            col_db = f"predicted_{tgt}"
-            for weather_id, pred_val in zip(df["weather_id"], preds):
-                target_predictions[int(weather_id)][col_db] = round(float(pred_val), 6)
-
-        # ---- Add comfort calculations to the DataFrame ----
-        logger.info("Adding comfort calculations to DataFrame")
-        if done and not df.empty:
-            df = _add_comfort_cols(df, prof)  # Add comfort columns directly to df
-            logger.info("Comfort calculations completed")
-            
-            # Map comfort columns from DataFrame to database prediction records
-            for idx, row in df.iterrows():
-                weather_id = int(row["weather_id"])
-                if weather_id in target_predictions:
-                    pred_data = target_predictions[weather_id]
-                    
-                    # Add PMV/PPD values if available
-                    if 'PMV_pred' in row and pd.notna(row['PMV_pred']):
-                        pred_data['pmv'] = float(row['PMV_pred'])
-                    if 'PPD_pred' in row and pd.notna(row['PPD_pred']):
-                        pred_data['ppd'] = float(row['PPD_pred'])
-                    
-                    # Add comfort classes
-                    if 'thermal_class' in row and pd.notna(row['thermal_class']):
-                        pred_data['thermal_comfort_class'] = str(row['thermal_class'])
-                    if 'visual_class' in row and pd.notna(row['visual_class']):
-                        pred_data['visual_comfort_class'] = str(row['visual_class'])
-                    if 'acoustic_class' in row and pd.notna(row['acoustic_class']):
-                        pred_data['acoustic_comfort_class'] = str(row['acoustic_class'])
-                    
-                    # Add comfort scores
-                    if 'vis_score_pred' in row and pd.notna(row['vis_score_pred']):
-                        pred_data['visual_comfort_score'] = float(row['vis_score_pred'])
-                    if 'annoy_pred' in row and pd.notna(row['annoy_pred']):
-                        pred_data['acoustic_annoyance_level'] = float(row['annoy_pred'])
-                    
-                    # Add IAQ comfort classes
-                    if 'co2_ppm_class' in row and pd.notna(row['co2_ppm_class']):
-                        pred_data['co2_comfort_class'] = str(row['co2_ppm_class'])
-                    if 'co_ppm_class' in row and pd.notna(row['co_ppm_class']):
-                        pred_data['co_comfort_class'] = str(row['co_ppm_class'])
-                    if 'tvoc_ppb_class' in row and pd.notna(row['tvoc_ppb_class']):
-                        pred_data['tvoc_comfort_class'] = str(row['tvoc_ppb_class'])
-                    if 'pm2_5_ugm3_class' in row and pd.notna(row['pm2_5_ugm3_class']):
-                        pred_data['pm25_comfort_class'] = str(row['pm2_5_ugm3_class'])
-                    if 'pm10_ugm3_class' in row and pd.notna(row['pm10_ugm3_class']):
-                        pred_data['pm10_comfort_class'] = str(row['pm10_ugm3_class'])
-                    
-                    # Add overall comfort
-                    if 'overall_comfort' in row and pd.notna(row['overall_comfort']):
-                        pred_data['overall_comfort'] = float(row['overall_comfort'])
-                    if 'overall_comfort_class' in row and pd.notna(row['overall_comfort_class']):
-                        pred_data['overall_comfort_class'] = str(row['overall_comfort_class'])
-            
-            logger.info("Comfort data mapped to prediction records")
-
-        # Convert to list for bulk insert
-        predictions_bulk = list(target_predictions.values())
-        
-        if predictions_bulk:
-            try:
-                ses.bulk_insert_mappings(Prediction, predictions_bulk)
-                ses.commit()
-                logger.info("Inserted %d prediction rows with %d targets and comfort data for profile '%s'", 
-                          len(predictions_bulk), len(done), prof_id)
-            except IntegrityError as ie:
-                logger.warning("Prediction insert duplicates ignored: %s", ie)
-                ses.rollback()
-                
-                # For existing predictions, we might want to update them with comfort data
-                # But for now, we'll just skip and use existing data
-                logger.info("Using existing prediction data")
-
-        if skipped:
-            st.sidebar.warning("🎯 Skipped targets: " + ", ".join(skipped))
-        st.session_state["pred_df"] = df
-        st.session_state["predicted"] = True
-
-    st.sidebar.success("Prediction complete")
-
+# Train and Simulate buttons
 col1, col2 = st.sidebar.columns(2)
 col1.button("🚀 Train models", on_click=_train, disabled=st.session_state["training"])
-col2.button("🔮 Predict", on_click=_predict)
+col2.button("🔮 Simulate", on_click=_predict)
 
 # DEBUG: Add test button to check database state
 def _test_database_state():
-    """Test function to check what's actually in the database."""
-    with SessionLocal() as ses:
-        # Check predictions
-        prediction_count = ses.query(Prediction).count()
-        logger.info(f"🔍 Database Test - Predictions in DB: {prediction_count}")
-        
-        # Check predictions with comfort data
-        comfort_predictions = ses.query(Prediction).filter(Prediction.occupant_profile.is_not(None)).count()
-        logger.info(f"🔍 Database Test - Predictions with comfort data: {comfort_predictions}")
-        
-        # Check latest predictions
-        latest_predictions = ses.query(Prediction).order_by(Prediction.predicted_at.desc()).limit(5).all()
-        logger.info(f"🔍 Database Test - Latest 5 predictions:")
-        for pred in latest_predictions:
-            logger.info(f"  - Prediction {pred.prediction_id}: profile={pred.occupant_profile}, overall_comfort={pred.overall_comfort}")
+    """Test database connectivity and state."""
+    try:
+        from db.models import Space, Measurement
+        with SessionLocal() as session:
+            # Check if spaces table exists and has data
+            spaces_count = session.query(Space).count()
+            measurements_count = session.query(Measurement).count()
             
-        # Show summary in UI
-        st.sidebar.info(f"📊 DB State: {prediction_count} predictions, {comfort_predictions} with comfort data")
+            st.write(f"🏢 Spaces in database: {spaces_count}")
+            st.write(f"📊 Measurements in database: {measurements_count}")
+            
+            if spaces_count > 0:
+                sample_space = session.query(Space).first()
+                st.write(f"📍 Sample space: {sample_space.space_id} in building {sample_space.building_id}")
+            
+            st.success("Database connection successful!")
+            
+    except Exception as e:
+        st.error(f"Database test failed: {str(e)}")
+        logger.exception(f"Database test error: {e}")
 
-if st.sidebar.button("🔍 Test DB State"):
-    _test_database_state()
+# Dev Tools in expandable section
+with st.sidebar.expander("🔧 Dev Tools", expanded=False):
+    # Test DB State button
+    if st.button("🔍 Test DB State", help="Check database state and recent predictions"):
+        _test_database_state()
 
-# Reset and cache management buttons
-reset_cache_col1, reset_cache_col2 = st.sidebar.columns(2)
+    # Reset and cache management buttons
+    reset_cache_col1, reset_cache_col2 = st.columns(2)
 
-# Clear Cache button
-if reset_cache_col1.button("🧹 Clear Cache", help="Clear Streamlit's cache to free memory and force fresh data loading"):
-    _clear_cache()
+    # Clear Cache button
+    if reset_cache_col1.button("🧹 Clear Cache", help="Clear Streamlit's cache to free memory and force fresh data loading"):
+        _clear_cache()
 
-# Reset ALL button with confirmation
-if reset_cache_col2.button("⚠ Reset ALL", type="primary", help="WARNING WARNING: This will delete ALL data and reset the workspace"):
-    # Initialize confirmation state
-    if 'reset_confirmation' not in st.session_state:
-        st.session_state.reset_confirmation = False
-    
-    # Show confirmation dialog
-    st.session_state.reset_confirmation = True
+    # Reset ALL button with confirmation
+    if reset_cache_col2.button("⚠ Reset ALL", type="primary", help="WARNING WARNING: This will delete ALL data and reset the workspace"):
+        # Initialize confirmation state
+        if 'reset_confirmation' not in st.session_state:
+            st.session_state.reset_confirmation = False
+        
+        # Show confirmation dialog
+        st.session_state.reset_confirmation = True
 
 # Handle confirmation dialog
 if st.session_state.get('reset_confirmation', False):
     with st.sidebar.container():
         st.warning("⚠️ **CONFIRM RESET**")
         st.write("This will permanently delete:")
-        st.write("• All measurements, predictions, and models")
-        st.write("• All energy simulation results")
-        st.write("• All uploaded files and weather data")
-        st.write("• All logs and reports")
+        st.write("- All measurements, predictions, and models")
+        st.write("- All energy simulation results")
+        st.write("- All uploaded files and weather data")
+        st.write("- All logs and reports")
         
         confirm_col1, confirm_col2 = st.columns(2)
         
@@ -2954,10 +3586,6 @@ if st.session_state.get('reset_confirmation', False):
             st.session_state.reset_confirmation = False
             st.rerun()
 
-# logo bottom
-st.sidebar.markdown("---")
-st.sidebar.image(LOGO, width=140)
-
 # ---------------------------------------------------------------------------
 # Display name helpers
 # ---------------------------------------------------------------------------
@@ -2965,22 +3593,34 @@ DISPLAY = {
     "time_end": "Timestamp",
 
     # ---- Measurement labels
-    "temperature_c": "Temperature °C",
-    "rh_percent": "Relative Humidity %",
+    "temperature_c": "Indoor Temperature (°C)",
+    "rh_percent": "Indoor Rel. Humidity (%)",
     "luminance_lux": "Luminance (lux)",
     "average_noise_db": "Avg Noise (dB)",
     "peak_db": "Peak Noise (dB)",
     "co_ppm":  "CO (ppm)",
     "co2_ppm": "CO₂ (ppm)",
     "pm2_5_ugm3": "PM₂.₅ (µg/m³)",
-    "pm2_5_ugm3": "PM10 (µg/m³)",
+    "pm10_ugm3": "PM10 (µg/m³)",
     "tvoc_ppb": "TVOC (ppb)",
+
+    # --- Predicted measurement labels (new naming convention)
+    "pred_temperature_c": "Indoor Temperature (°C)",
+    "pred_rh_percent": "Indoor Rel. Humidity (%)",
+    "pred_luminance_lux": "Luminance (lux)",
+    "pred_average_noise_db": "Avg Noise (dB)",
+    "pred_peak_db": "Peak Noise (dB)",
+    "pred_co_ppm": "CO (ppm)",
+    "pred_co2_ppm": "CO₂ (ppm)",
+    "pred_pm2_5_ugm3": "PM₂.₅ (μg/m³)",
+    "pred_pm10_ugm3": "PM10 (μg/m³)",
+    "pred_tvoc_ppb": "TVOC (ppb)",
 
     # --- Comfort labels
     "PMV_pred":         "Predicted PMV",
-    "PPD_pred":         "Predicted_PPD (%)",
-    "vis_score_pred":   "Visual score",
-    "annoy_pred":       "Annoyance lvl",
+    "PPD_pred":         "Predicted PPD (%)",
+    "vis_score_pred":   "Visual Score",
+    "annoy_pred":       "Annoyance Level",
     "overall_comfort":  "Overall Comfort",
 
     # --- Comfort classes
@@ -2994,7 +3634,7 @@ DISPLAY = {
     "co_ppm_class":         "CO",
     "co2_ppm_class":        "CO₂",
     "pm2_5_ugm3_class":     "PM₂.₅",
-    "pm2_5_ugm3_class":     "PM10",
+    "pm10_ugm3_class":      "PM10",
     "tvoc_ppb_class":       "TVOC",
 }
 
@@ -3164,11 +3804,12 @@ def _line_chart(df: pd.DataFrame, obs: str | None, pred: str):
         .mark_line(point=True)
         .encode(
             x=alt.X("Timestamp:T", axis=alt.Axis(format="%d %b %Y", labelAngle=-90)),
-            y=alt.Y("value:Q", title=title),
+            y=alt.Y("value:Q", title=""),
             color=alt.Color("Series", scale=alt.Scale(domain=["Observed", "Predicted"])),
             order="order:Q",
             opacity=alt.condition(alt.datum.Series == "Predicted", alt.value(0.7), alt.value(1)),
         )
+        .properties(title=title)
         .interactive()
     )
     st.altair_chart(line, use_container_width=True)
@@ -3190,13 +3831,13 @@ def _line_chart(df: pd.DataFrame, obs: str | None, pred: str):
 # ---------------------------------------------------------------------------
 def _class_timeseries(df: pd.DataFrame, cols: list[str], *, title: str):
     """Draw a line/step chart of class evolution over time."""
-    logger.info(f"Creating class timeseries for {title} with {len(df)} records and columns: {cols}")
+    logger.debug(f"Creating class timeseries for {title} with {len(df)} records and columns: {cols}")
     
     if not cols:
         logger.warning(f"No columns available for {title}")
         st.info(f"No {title.lower()} data"); return
 
-    logger.info("Preparing data for timeseries chart...")
+    logger.debug("Preparing data for timeseries chart...")
     # tidy: Timestamp | Series | Class
     tmp = (df[["time_end"] + cols]
            .rename(columns={"time_end": "Timestamp"})
@@ -3207,7 +3848,7 @@ def _class_timeseries(df: pd.DataFrame, cols: list[str], *, title: str):
         logger.warning(f"No data available after processing for {title}")
         st.info(f"No {title.lower()} data"); return
 
-    logger.info(f"Creating Altair chart for {title} with {len(tmp)} data points...")
+    logger.debug(f"Creating Altair chart for {title} with {len(tmp)} data points...")
     # ensure consistent ordering on the y-axis
     cat_order = ["A", "B", "C", "D", "NC"]
     cats      = [c for c in cat_order if c in tmp["Class"].unique()]
@@ -3219,16 +3860,17 @@ def _class_timeseries(df: pd.DataFrame, cols: list[str], *, title: str):
                        axis=alt.Axis(title=None, format="%d %b %Y", labelAngle=-90)),
                y=alt.Y("Class:N",
                        sort=cats,
-                       axis=alt.Axis(title=title)),
+                       axis=alt.Axis(title="")),
                color="Series:N",
            )
+           .properties(title=title)
            .interactive()
     )
-    logger.info(f"Displaying timeseries chart for {title}...")
+    logger.debug(f"Displaying timeseries chart for {title}...")
     st.altair_chart(chart, use_container_width=True)
-    logger.info(f"Timeseries chart displayed successfully for {title}")
+    logger.debug(f"Timeseries chart displayed successfully for {title}")
 
-    logger.info(f"Creating CSV export for {title}...")
+    logger.debug(f"Creating CSV export for {title}...")
     # download button -------------------------------------------------
     csv_bytes = tmp.to_csv(index=False).encode()
     st.download_button(
@@ -3242,14 +3884,14 @@ def _class_timeseries(df: pd.DataFrame, cols: list[str], *, title: str):
 
 def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "default") -> None:
     """Draw a pie chart of comfort-class distribution."""
-    logger.info(f"Starting pie chart generation for {class_col} with {len(df)} records")
+    logger.debug(f"Starting pie chart generation for {class_col} with {len(df)} records")
     
     if class_col not in df.columns:
         logger.warning(f"Column {class_col} not found in dataframe. Available columns: {list(df.columns)}")
         st.info(f"No {title.lower()} data")
         return
 
-    logger.info(f"Calculating value counts for {class_col}...")
+    logger.debug(f"Calculating value counts for {class_col}...")
     # --- counts -----------------------------------------------------------
     counts = (df[class_col]
               .dropna()
@@ -3259,16 +3901,16 @@ def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "
               .reset_index()
               .rename(columns={class_col: "Class"}))
     counts["Share"] = counts["count"] / counts["count"].sum()
-    logger.info(f"Value counts calculated: {len(counts)} classes")
+    logger.debug(f"Value counts calculated: {len(counts)} classes")
 
-    logger.info(f"Building legend labels for {class_col}...")
+    logger.debug(f"Building legend labels for {class_col}...")
     # --- build legend labels "A (limits)" ---------------------------------
     limits = _LIMITS.get(class_col, {})
     counts["Label"] = counts["Class"].apply(
         lambda c: f"{c} ({limits.get(c,'')})" if c in limits else c
     )
 
-    logger.info(f"Creating Altair chart for {class_col}...")
+    logger.debug(f"Creating Altair chart for {class_col}...")
     # stable ordering  A,B,C,D,NC  → keeps colours fixed
     # order = [c for c in ["A", "B", "C", "D", "NC"] if c in counts["Class"].values]
     # order = ["A", "B", "C", "D", "NC"]
@@ -3303,12 +3945,12 @@ def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "
                ],
             )
     )
-    logger.info(f"Displaying Altair chart for {class_col}...")
+    logger.debug(f"Displaying Altair chart for {class_col}...")
     st.altair_chart(chart, use_container_width=True)
-    logger.info(f"Chart displayed successfully for {class_col}")
+    logger.debug(f"Chart displayed successfully for {class_col}")
     
     # ----- per-chart CSV export -----
-    logger.info(f"Creating CSV export button for {class_col}...")
+    logger.debug(f"Creating CSV export button for {class_col}...")
     csv_bytes = counts.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Export CSV",
@@ -3318,18 +3960,339 @@ def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "
         type="secondary",
         key=f"csv_{context}_{class_col}",
     )
-    logger.info(f"Pie chart generation completed for {class_col}")
+    logger.debug(f"Pie chart generation completed for {class_col}")
+
+
+def _generate_iaq_report(df: pd.DataFrame):
+    """Generate automatic IAQ report based on comfort classes and thresholds."""
+    
+    # IAQ Explainer
+    st.markdown("### 📊 IAQ Assessment Method")
+    st.info("""
+    **Evaluation Method:** Indoor Air Quality is assessed using concentration thresholds for key pollutants: 
+    CO₂ levels (ppm), CO levels (ppm), TVOC emissions (ppb), and particulate matter PM2.5 & PM10 (μg/m³). 
+    Each parameter is classified into comfort classes A (excellent) through D (poor) based on established health and comfort standards.
+    """)
+    
+    # Calculate IAQ metrics from available data
+    iaq_fields = ["co2_ppm_class", "co_ppm_class", "tvoc_ppb_class", "pm2_5_ugm3_class", "pm10_ugm3_class"]
+    available_fields = [f for f in iaq_fields if f in df.columns]
+    
+    if not available_fields:
+        st.info("No IAQ data available for analysis.")
+        return
+    
+    # Performance Report
+    st.markdown("### 📈 IAQ Performance Report")
+    
+    total_records = len(df)
+    overall_compliance = []
+    worst_param = None
+    worst_compliance = 100
+    
+    # Parameter-specific analysis
+    param_names = {
+        'co2_ppm_class': 'CO₂',
+        'co_ppm_class': 'CO', 
+        'tvoc_ppb_class': 'TVOC',
+        'pm2_5_ugm3_class': 'PM2.5',
+        'pm10_ugm3_class': 'PM10'
+    }
+    
+    for field in available_fields:
+        if field in df.columns:
+            class_counts = df[field].value_counts()
+            total_valid = class_counts.sum()
+            
+            if total_valid > 0:
+                # Classes A and B are considered compliant
+                compliant = class_counts.get('A', 0) + class_counts.get('B', 0)
+                compliance_pct = (compliant / total_valid) * 100
+                overall_compliance.append(compliance_pct)
+                
+                param_name = param_names.get(field, field)
+                
+                # Track worst performing parameter
+                if compliance_pct < worst_compliance:
+                    worst_compliance = compliance_pct
+                    worst_param = param_name
+                
+                # Poor performance analysis
+                poor_classes = class_counts.get('C', 0) + class_counts.get('D', 0)
+                poor_pct = (poor_classes / total_valid) * 100
+                
+                with st.expander(f"🔍 {param_name} Analysis"):
+                    st.write(f"**Compliance Rate:** {compliance_pct:.1f}% of measurements met acceptable standards (Classes A-B)")
+                    
+                    if poor_pct > 20:
+                        st.warning(f"**Concern:** {poor_pct:.1f}% of measurements showed poor air quality, indicating potential health risks.")
+                    elif poor_pct > 10:
+                        st.info(f"**Moderate Issues:** {poor_pct:.1f}% of measurements were suboptimal.")
+                    else:
+                        st.success(f"**Good Performance:** Only {poor_pct:.1f}% of measurements were suboptimal.")
+    
+    # Overall Summary
+    if overall_compliance:
+        avg_compliance = sum(overall_compliance) / len(overall_compliance)
+        
+        st.markdown("### 🎯 Overall IAQ Summary")
+        
+        if avg_compliance >= 80:
+            st.success(f"**Good Overall IAQ:** Average compliance rate of {avg_compliance:.1f}% indicates generally healthy indoor air quality.")
+        elif avg_compliance >= 60:
+            st.warning(f"**Moderate IAQ:** Average compliance rate of {avg_compliance:.1f}% suggests room for improvement in air quality management.")
+        else:
+            st.error(f"**Poor IAQ:** Average compliance rate of {avg_compliance:.1f}% indicates significant air quality issues requiring immediate attention.")
+        
+        # Main limitation identification
+        if worst_param:
+            st.info(f"**Main Limitation:** {worst_param} shows the poorest performance with {worst_compliance:.1f}% compliance rate.")
+
+
+def _generate_thermal_report(df: pd.DataFrame):
+    """Generate automatic thermal comfort report."""
+    st.markdown("### 📊 Thermal Comfort Assessment Method")
+    st.info("""
+    **Evaluation Method:** Thermal comfort is evaluated using Predicted Mean Vote (PMV) and Predicted Percentage Dissatisfied (PPD) indices. 
+    PMV ranges from -3 (cold) to +3 (hot) with ±0.5 being acceptable, while PPD indicates the percentage of people likely to be dissatisfied.
+    """)
+    
+    if 'thermal_class' not in df.columns:
+        st.info("No thermal comfort data available for analysis.")
+        return
+    
+    class_counts = df['thermal_class'].value_counts()
+    total_valid = class_counts.sum()
+    
+    if total_valid == 0:
+        st.info("No valid thermal comfort data available.")
+        return
+    
+    compliant = class_counts.get('A', 0) + class_counts.get('B', 0)
+    compliance_pct = (compliant / total_valid) * 100
+    poor_pct = (class_counts.get('C', 0) + class_counts.get('D', 0)) / total_valid * 100
+    
+    st.markdown("### 📈 Thermal Performance Report")
+    st.write(f"**Compliance Rate:** {compliance_pct:.1f}% of conditions met acceptable thermal comfort standards (Classes A-B)")
+    
+    if poor_pct > 20:
+        st.warning(f"**Significant Discomfort:** {poor_pct:.1f}% of conditions caused thermal dissatisfaction, indicating inadequate HVAC control.")
+    elif poor_pct > 10:
+        st.info(f"**Moderate Issues:** {poor_pct:.1f}% of conditions were suboptimal for thermal comfort.")
+    else:
+        st.success(f"**Good Performance:** Only {poor_pct:.1f}% of conditions were thermally uncomfortable.")
+
+
+def _generate_visual_report(df: pd.DataFrame):
+    """Generate automatic visual comfort report."""
+    st.markdown("### 📊 Visual Comfort Assessment Method")
+    st.info("""
+    **Evaluation Method:** Visual comfort is assessed using illuminance levels (lux) measured at work surfaces. 
+    Optimal ranges balance adequate task lighting (200-700 lux) while avoiding glare and eye strain from excessive brightness.
+    """)
+    
+    if 'visual_class' not in df.columns:
+        st.info("No visual comfort data available for analysis.")
+        return
+    
+    class_counts = df['visual_class'].value_counts()
+    total_valid = class_counts.sum()
+    
+    if total_valid == 0:
+        st.info("No valid visual comfort data available.")
+        return
+    
+    compliant = class_counts.get('A', 0) + class_counts.get('B', 0)
+    compliance_pct = (compliant / total_valid) * 100
+    poor_pct = class_counts.get('C', 0) / total_valid * 100
+    
+    st.markdown("### 📈 Visual Performance Report")
+    st.write(f"**Compliance Rate:** {compliance_pct:.1f}% of conditions provided adequate lighting (Classes A-B)")
+    
+    if poor_pct > 25:
+        st.warning(f"**Lighting Issues:** {poor_pct:.1f}% of conditions had inadequate or excessive illumination.")
+    else:
+        st.success(f"**Good Lighting:** Only {poor_pct:.1f}% of conditions were visually uncomfortable.")
+
+
+def _generate_acoustic_report(df: pd.DataFrame):
+    """Generate automatic acoustic comfort report."""
+    st.markdown("### 📊 Acoustic Comfort Assessment Method")
+    st.info("""
+    **Evaluation Method:** Acoustic comfort is evaluated using A-weighted equivalent sound levels (LAeq) in decibels. 
+    Classifications range from Class A (<35 dB, excellent) to Class D (≥65 dB, poor) based on suitability for concentration and communication.
+    """)
+    
+    if 'acoustic_class' not in df.columns:
+        st.info("No acoustic comfort data available for analysis.")
+        return
+    
+    class_counts = df['acoustic_class'].value_counts()
+    total_valid = class_counts.sum()
+    
+    if total_valid == 0:
+        st.info("No valid acoustic comfort data available.")
+        return
+    
+    compliant = class_counts.get('A', 0) + class_counts.get('B', 0) + class_counts.get('C', 0)
+    compliance_pct = (compliant / total_valid) * 100
+    poor_pct = class_counts.get('D', 0) / total_valid * 100
+    
+    st.markdown("### 📈 Acoustic Performance Report")
+    st.write(f"**Compliance Rate:** {compliance_pct:.1f}% of conditions maintained acceptable noise levels (Classes A-C: <65 dB)")
+    
+    if poor_pct > 15:
+        st.warning(f"**Noise Issues:** {poor_pct:.1f}% of conditions exceeded 65 dB, likely causing concentration difficulties.")
+    else:
+        st.success(f"**Good Acoustic Environment:** Only {poor_pct:.1f}% of conditions were acoustically disruptive.")
+
+
+def _generate_overall_comfort_report(df: pd.DataFrame):
+    """Generate comprehensive comfort analysis report for Energy Comfortness section."""
+    
+    st.markdown("### 📊 Overall Comfort Assessment")
+    st.info("""
+    **Evaluation Method:** Overall comfort integrates thermal (PMV/PPD), visual (lux), acoustic (dB), and air quality (ppm/μg/m³) metrics. 
+    Each domain is classified into comfort classes A-D, with an aggregate comfort score representing the combined indoor environmental quality.
+    """)
+    
+    # Analyze available comfort domains
+    comfort_domains = {
+        'thermal_class': 'Thermal',
+        'visual_class': 'Visual', 
+        'acoustic_class': 'Acoustic',
+        'co2_ppm_class': 'CO₂',
+        'tvoc_ppb_class': 'TVOC',
+        'pm2_5_ugm3_class': 'PM2.5'
+    }
+    
+    available_domains = {field: name for field, name in comfort_domains.items() if field in df.columns}
+    
+    if not available_domains:
+        st.info("No comfort analysis data available.")
+        return
+    
+    st.markdown("### 📈 Multi-Domain Performance Report")
+    
+    total_records = len(df)
+    domain_performance = {}
+    
+    # Analyze each available domain
+    for field, domain_name in available_domains.items():
+        if field in df.columns:
+            class_counts = df[field].value_counts()
+            total_valid = class_counts.sum()
+            
+            if total_valid > 0:
+                # Classes A and B are considered acceptable
+                compliant = class_counts.get('A', 0) + class_counts.get('B', 0)
+                compliance_pct = (compliant / total_valid) * 100
+                
+                # Class A is excellent
+                excellent_pct = (class_counts.get('A', 0) / total_valid) * 100
+                
+                # Classes C and D are poor
+                poor_classes = class_counts.get('C', 0) + class_counts.get('D', 0)
+                poor_pct = (poor_classes / total_valid) * 100
+                
+                domain_performance[domain_name] = {
+                    'compliance': compliance_pct,
+                    'excellent': excellent_pct,
+                    'poor': poor_pct,
+                    'total_records': total_valid
+                }
+    
+    # Overall summary
+    if domain_performance:
+        avg_compliance = sum(d['compliance'] for d in domain_performance.values()) / len(domain_performance)
+        avg_excellent = sum(d['excellent'] for d in domain_performance.values()) / len(domain_performance)
+        avg_poor = sum(d['poor'] for d in domain_performance.values()) / len(domain_performance)
+        
+        # Performance summary
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Average Compliance (A-B)", f"{avg_compliance:.1f}%")
+        with col2:
+            st.metric("Excellent Conditions (A)", f"{avg_excellent:.1f}%")
+        with col3:
+            st.metric("Poor Conditions (C-D)", f"{avg_poor:.1f}%")
+        
+        # Domain breakdown
+        with st.expander("🔍 Domain-by-Domain Analysis"):
+            for domain_name, metrics in domain_performance.items():
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.write(f"**{domain_name}**")
+                with col2:
+                    st.write(f"{metrics['compliance']:.1f}% compliant")
+                with col3:
+                    st.write(f"{metrics['excellent']:.1f}% excellent")
+                with col4:
+                    st.write(f"{metrics['poor']:.1f}% poor")
+        
+        # Overall assessment
+        st.markdown("### 🎯 Integrated Comfort Summary")
+        
+        if avg_compliance >= 80 and avg_poor <= 10:
+            st.success(f"**Excellent Overall Comfort:** {avg_compliance:.1f}% average compliance with only {avg_poor:.1f}% poor conditions across all comfort domains.")
+        elif avg_compliance >= 70:
+            st.success(f"**Good Overall Comfort:** {avg_compliance:.1f}% average compliance indicates satisfactory indoor environmental quality.")
+        elif avg_compliance >= 50:
+            st.warning(f"**Moderate Comfort Issues:** {avg_compliance:.1f}% average compliance suggests room for improvement across multiple comfort domains.")
+        else:
+            st.error(f"**Significant Comfort Deficiencies:** {avg_compliance:.1f}% average compliance indicates widespread indoor environmental quality issues.")
+        
+        # Identify worst performing domain
+        worst_domain = min(domain_performance.items(), key=lambda x: x[1]['compliance'])
+        best_domain = max(domain_performance.items(), key=lambda x: x[1]['compliance'])
+        
+        st.info(f"**Performance Range:** {best_domain[0]} performs best ({best_domain[1]['compliance']:.1f}% compliance) while {worst_domain[0]} shows the most issues ({worst_domain[1]['compliance']:.1f}% compliance).")
+    
+    # Overall comfort class analysis if available
+    if 'overall_comfort_class' in df.columns:
+        st.markdown("### 🏆 Overall Comfort Classification")
+        overall_counts = df['overall_comfort_class'].value_counts()
+        total_overall = overall_counts.sum()
+        
+        if total_overall > 0:
+            excellent_overall = (overall_counts.get('A', 0) / total_overall) * 100
+            good_overall = (overall_counts.get('B', 0) / total_overall) * 100
+            acceptable_overall = (overall_counts.get('C', 0) / total_overall) * 100
+            poor_overall = (overall_counts.get('D', 0) + overall_counts.get('NC', 0)) / total_overall * 100
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Excellent + Good (A-B)", f"{excellent_overall + good_overall:.1f}%")
+            with col2:
+                st.metric("Poor + Unclassified (D+NC)", f"{poor_overall:.1f}%")
+            
+            if excellent_overall + good_overall >= 70:
+                st.success(f"**Strong Overall Performance:** {excellent_overall + good_overall:.1f}% of conditions achieve good or excellent overall comfort ratings.")
+            elif acceptable_overall >= 60:
+                st.info(f"**Acceptable Performance:** Most conditions ({excellent_overall + good_overall + acceptable_overall:.1f}%) meet at least minimum comfort standards.")
+            else:
+                st.warning(f"**Performance Concerns:** Only {excellent_overall + good_overall:.1f}% of conditions achieve good overall comfort ratings.")
+
 
 # ---------------------------------------------------------------------------
 # Start
 # ---------------------------------------------------------------------------
 if st.session_state.get("predicted"):
-    df_pred: pd.DataFrame = st.session_state["pred_df"]
+    # Safely get prediction DataFrame
+    df_pred: pd.DataFrame = st.session_state.get("pred_df", pd.DataFrame())
+    
+    if df_pred.empty:
+        st.warning("⚠️ No prediction data available. Please run simulation first.")
+        st.stop()
     
     # Select based on space
-    sel = st.session_state.get("sensor_filter").strip()
+    sel = st.session_state.get("space_filter", "")  # Changed from sensor_filter to space_filter
     if sel:
-        df_pred = df_pred[df_pred["sensor_id"] == sel]
+        # Use space_id instead of space_id for filtering
+        if "space_id" in df_pred.columns:
+            df_pred = df_pred[df_pred["space_id"] == sel]
+        elif "space_id" in df_pred.columns:  # Fallback for legacy data
+            df_pred = df_pred[df_pred["space_id"] == sel]
         logger.info("Plotting data for space %s", sel)
     
     # ---- Fetch actual measurements and merge with predictions ----
@@ -3338,8 +4301,8 @@ if st.session_state.get("predicted"):
             ses.query(Measurement)
             .filter(
                 Measurement.time_end.between(start_dt, end_dt),
-                Measurement.sensor_id.in_(
-                    [sel] if sel else _get_sensor_ids()
+                Measurement.space_id.in_(
+                    [sel] if sel else _get_space_ids()
                 )
             )
             .all()
@@ -3350,15 +4313,15 @@ if st.session_state.get("predicted"):
             df_obs = pd.DataFrame([{c.name: _convert_decimal_to_float(getattr(r, c.name)) for c in r.__table__.columns} for r in measurement_rows])
             # Filter by selected sensor if needed
             if sel:
-                df_obs = df_obs[df_obs["sensor_id"] == sel]
+                df_obs = df_obs[df_obs["space_id"] == sel]
             
-            # Merge observations with predictions on time_end and sensor_id
+            # Merge observations with predictions on time_end and space_id
             df_pred = pd.merge(
                 df_pred, 
-                df_obs[["time_end", "sensor_id", "temperature_c", "rh_percent", "luminance_lux", 
+                df_obs[["time_end", "space_id", "temperature_c", "rh_percent", "luminance_lux", 
                        "average_noise_db", "peak_db", "co2_ppm", "pm2_5_ugm3", "tvoc_ppb", 
                        "co_ppm", "pm10_ugm3"]],
-                on=["time_end", "sensor_id"],
+                on=["time_end", "space_id"],
                 how="left"  # Keep all predictions, add observations where available
             )
             logger.info("Merged %d measurement rows with predictions", len(df_obs))
@@ -3386,7 +4349,7 @@ if st.session_state.get("predicted"):
                                .filter(Prediction.pmv.isnot(None)))  # Only get predictions with comfort data
                 
                 if sel:
-                    comfort_query = comfort_query.filter(Weather.sensor_id == sel)
+                    comfort_query = comfort_query.filter(Weather.space_id == sel)
                 
                 comfort_results = comfort_query.all()
                 
@@ -3398,7 +4361,7 @@ if st.session_state.get("predicted"):
                     for prediction, weather in comfort_results:
                         comfort_df_data.append({
                             'time_end': weather.time_end,
-                            'sensor_id': weather.sensor_id,
+                            'space_id': weather.space_id,
                             'PMV_pred': _convert_decimal_to_float(prediction.pmv),
                             'PPD_pred': _convert_decimal_to_float(prediction.ppd),
                             'vis_score_pred': _convert_decimal_to_float(prediction.visual_comfort_score),
@@ -3411,11 +4374,11 @@ if st.session_state.get("predicted"):
                     
                     comfort_df = pd.DataFrame(comfort_df_data)
                     
-                    # Merge comfort data with predictions on time_end and sensor_id
+                    # Merge comfort data with predictions on time_end and space_id
                     df_pred = pd.merge(
                         df_pred, 
                         comfort_df,
-                        on=["time_end", "sensor_id"],
+                        on=["time_end", "space_id"],
                         how="left"  # Keep all predictions, add comfort where available
                     )
                     logger.info(f"Merged comfort data with predictions. Comfort columns added: {list(comfort_df.columns)}")
@@ -3432,7 +4395,7 @@ if st.session_state.get("predicted"):
                     df_pred['co2_comfort_class'] = None
                     
         except Exception as e:
-            logger.error(f"Error fetching comfort data for line charts: {e}", exc_info=True)
+            logger.exception(f"Error fetching comfort data for line charts: {e}", exc_info=True)
             # Add empty comfort columns so charts don't fail
             df_pred['PMV_pred'] = None
             df_pred['PPD_pred'] = None
@@ -3454,8 +4417,21 @@ if st.session_state.get("predicted"):
         start_dt, end_dt, len(df_pred)
     )
 
-    # setup tabs
-    tabs = st.tabs(["Thermal", "Visual", "Acoustic", "IAQ", "Energy", "Energy Comfortness"])
+    # Initialize tab state management
+    if 'active_tab' not in st.session_state:
+        st.session_state.active_tab = 0
+    
+    # Check if we need to force Energy tab selection
+    if st.session_state.get('keep_energy_tab', False):
+        st.session_state.active_tab = 4  # Force Energy tab (index 4)
+        st.success("🔄 **Energy Simulation Active** - Staying on Energy tab to show progress and results.")
+        st.session_state.keep_energy_tab = False  # Reset flag
+    
+    # Create tab selector in sidebar for better control
+    tab_names = ["Thermal", "Visual", "Acoustic", "IAQ", "Energy", "Energy Comfortness"]
+    
+    # setup tabs (they will always start from first tab, but we'll only show content for active tab)
+    tabs = st.tabs(tab_names)
     domain_map = {
         "Thermal": ["temperature_c", "rh_percent", "PMV_pred", "PPD_pred"],
         "Visual": ["luminance_lux", "vis_score_pred"],
@@ -3464,526 +4440,227 @@ if st.session_state.get("predicted"):
         "Energy": [],  # Will be handled separately
         "Energy Comfortness": [],  # Will be handled separately
     }
-    for name, tab in zip(domain_map.keys(), tabs):
+    for idx, (name, tab) in enumerate(zip(domain_map.keys(), tabs)):
         with tab:
             if name == 'Energy':
-                # ========== Energy Comfortness Tab ==========
-                st.header(" Energy Simulation")
-                st.markdown("Generate weather files and run energy simulations for building comfort analysis.")
+                st.header("⚡ Energy Simulation")
+                st.markdown("Run detailed building energy simulations for comfort analysis.")
+                
+                # Check if simulation is running - workflow handled later in the code
+                # Note: Do not use st.stop() here as it prevents the simulation workflow from executing
                 
                 # Check if we should prevent UI updates during simulation
-                if st.session_state.get('prevent_rerun', False):
-                    logger.info("UI updates prevented during simulation - showing simulation in progress message")
-                    st.info("⚙️ Simulation in progress... Please wait.")
-                    st.stop()
+                # Note: Removed st.stop() to allow simulation workflow to execute
                 
-                # **NEW: Display latest simulation results only if they match the current date filter**
-                logger.debug("Checking for latest simulation results to display by default")
-                latest_results = _get_latest_simulation_results()
-                if latest_results:
-                    logger.info(f"Found latest simulation results: {latest_results.get('timestamp', 'unknown timestamp')}")
+                # Display latest simulation results
+                def display_energy_simulation_results():
+                    """Display the latest energy simulation results if available."""
+                    try:
+                        latest_results = _get_latest_simulation_results()
+                        if latest_results:
+                            # Use a default space_id or extract from results
+                            space_id = latest_results.get('space_id', 'latest')
+                            _display_energy_results(latest_results, space_id)
+                        else:
+                            # No results available - could show a message or do nothing
+                            logger.debug("No simulation results found to display")
+                    except Exception as e:
+                        logger.exception(f"Error displaying simulation results: {e}")
+                
+                display_energy_simulation_results()
+                
+                # Simulation workflow trigger - MUST come before UI logic
+                if st.session_state.get('simulation_running', False):
+                    logger.info("SIMULATION WORKFLOW TRIGGERED - Starting energy simulation pipeline")
+                    logger.info(f"Session state: simulation_running={st.session_state.get('simulation_running')}")
+                    logger.info(f"Available parameters: IFC={st.session_state.get('latest_ifc_path')}, Space={st.session_state.get('space_filter')}")
+                    logger.info(f"Date range: {st.session_state.get('start_dt')} to {st.session_state.get('end_dt')}")
                     
-                    # Extract simulation year and check if it matches the selected date range
-                    show_results = False
-                    if 'eplus_results_path' in latest_results:
-                        actual_results_dir = Path(latest_results['eplus_results_path'])
-                        simulation_year = _get_simulation_year_from_epw(actual_results_dir)
-                        
-                        if simulation_year:
-                            logger.info(f"Extracted simulation year: {simulation_year}")
-                            # Check if simulation year overlaps with selected date range
-                            selected_years = set(range(start.year, end.year + 1))
-                            if simulation_year in selected_years:
-                                show_results = True
-                                logger.info(f"Simulation year {simulation_year} matches selected date range {start.year}-{end.year}")
+                    st.subheader("🏃‍♂️ Running EnergyPlus Simulation")
+                    st.info("⏳ Energy simulation in progress... This may take several minutes.")
+                    
+                    with st.spinner("🔄 Processing EnergyPlus simulation pipeline..."):
+                        try:
+                            # Get configuration values
+                            latest_ifc_path = st.session_state.get('latest_ifc_path')
+                            target_sensor = st.session_state.get('space_filter')
+                            start_dt = st.session_state.get('start_dt')
+                            end_dt = st.session_state.get('end_dt')
+                            start = start_dt.date() if start_dt else date(2024, 1, 1)
+                            end = end_dt.date() if end_dt else date(2024, 1, 31)
+                            
+                            # Convert dates for pipeline
+                            start_datetime = datetime.combine(start, datetime.min.time())
+                            end_datetime = datetime.combine(end, datetime.min.time())
+                            
+                            # Create progress indicators
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            # Step 1: Generate weather file
+                            logger.info("Step 1: Generating weather file")
+                            status_text.text("🌤️ Generating weather file...")
+                            progress_bar.progress(25)
+                            
+                            from ece.pipeline_weather import generate_epw_for_location
+                            lat = st.session_state.get('init_lat', 40.6401)
+                            lon = st.session_state.get('init_lon', 22.9444)
+                            epw_path = generate_epw_for_location(
+                                space_id=target_sensor,
+                                latitude=lat,
+                                longitude=lon,
+                                start=start_datetime,
+                                end=end_datetime,
+                                full_year=True
+                            )
+                            logger.info(f"Weather file generated: {epw_path}")
+                            
+                            # Step 2: Prepare IFC file
+                            logger.info("Step 2: Preparing IFC file")
+                            status_text.text("📁 Preparing IFC file...")
+                            progress_bar.progress(50)
+                            
+                            ifc_path = Path(latest_ifc_path)
+                            logger.info(f"Using IFC file: {ifc_path}")
+                            
+                            # Step 3: Run EnergyPlus simulation
+                            logger.info("Step 3: Running EnergyPlus simulation")
+                            status_text.text("🏃‍♂️ Running EnergyPlus simulation...")
+                            progress_bar.progress(75)
+                            
+                            from ece.pipeline_eplus_wrapper import run_user_request
+                            simulation_results = run_user_request(
+                                ifc_file_path=ifc_path,
+                                weather_file_path=epw_path,
+                                sensor_id=target_sensor,  # Fixed: parameter name should be sensor_id
+                                start_date=start_datetime.strftime('%Y-%m-%d'),
+                                end_date=end_datetime.strftime('%Y-%m-%d'),
+                                project_base_dir=Path("./eplus_sim")
+                            )
+                            
+                            # Step 4: Store results
+                            logger.info("Step 4: Storing simulation results")
+                            status_text.text("💾 Storing simulation results...")
+                            progress_bar.progress(90)
+                            
+                            if simulation_results.get("success", False):
+                                storage_success = _store_energy_simulation_results(
+                                    simulation_results, target_sensor, str(ifc_path), str(epw_path)
+                                )
+                                if storage_success:
+                                    progress_bar.progress(100)
+                                    status_text.text("✅ Energy simulation completed successfully!")
+                                    st.success("✅ **Simulation completed!** Results stored in database.")
+                                else:
+                                    st.warning("⚠️ Simulation completed but failed to store results")
                             else:
-                                logger.info(f"Simulation year {simulation_year} does not match selected date range {start.year}-{end.year}")
-                        else:
-                            logger.warning("Could not extract simulation year from EPW file")
+                                error_msg = simulation_results.get('error', 'Unknown error')
+                                logger.exception(f"EnergyPlus simulation failed: {error_msg}")
+                                st.error(f"❌ **Simulation failed:** {error_msg}")
                     
-                    if show_results:
-                        with st.expander("📊 Latest Simulation Results", expanded=True):
-                            # Energy tab always shows building-wide data regardless of space selection
-                            _display_energy_results(latest_results, "latest")
-                    else:
-                        st.info("💡 Latest simulation results are from a different time period than your current selection. Adjust the date range or run a new simulation.")
-                else:
-                    logger.info("No latest simulation results found")
+                        except Exception as e:
+                            logger.exception(f"Error during energy simulation: {str(e)}", exc_info=True)
+                            st.error(f"❌ **Simulation error:** {str(e)}")
                 
-                # Display current settings from sidebar
-                col1, col2 = st.columns(2)
+                        finally:
+                            # Always reset flags when simulation is done
+                            st.session_state.simulation_running = False
+                            st.session_state.prevent_rerun = False
+                            st.session_state.keep_energy_tab = False
+                            logger.info("Energy simulation workflow completed, flags reset")
+                            # Auto-refresh to show results
+                            st.rerun()
                 
-                with col1:
-                    st.subheader("🌍 Location Settings")
-                    st.info(f"**Latitude:** {lat}  \n**Longitude:** {lon}")
-                    st.caption("💡 Adjust location in the sidebar")
-                
-                with col2:
-                    st.subheader("📅 Time Range Settings")
-                    st.info(f"**Start:** {start}  \n**End:** {end}")
-                    st.caption("💡 Adjust time range in the sidebar")
-                
-                # Check for existing EPW files
-                sensor_ids = _get_sensor_ids()
-                target_sensor = selected_sensor or (sensor_ids[0] if sensor_ids else None)
-                
-                existing_epw = None
-                if target_sensor:
-                    existing_epw = _find_existing_epw_file(target_sensor, start, end)
-                
-                # Display EPW file status with refresh button
-                header_col1, header_col2 = st.columns([3, 1])
-                with header_col1:
-                    st.subheader("🌤️ Weather File Status")
-                with header_col2:
-                    if st.button("🔄 Refresh", help="Refresh weather file status"):
-                        st.rerun()
-                
-                if existing_epw:
-                    st.success(f"✅ Weather file already exists: `{existing_epw.name}`")
-                    file_size = existing_epw.stat().st_size / 1024  # KB
-                    col1_status, col2_status = st.columns(2)
-                    col1_status.metric("File Size", f"{file_size:.1f} KB")
-                    col2_status.metric("Sensor", target_sensor)
+                if st.session_state.get('show_energy_simulation', True):
+                    # Energy Simulation Interface
+                    simulation_running = st.session_state.get('simulation_running', False)
                     
-                    # Option to download existing file
-                    with open(existing_epw, 'rb') as f:
-                        st.download_button(
-                            label="⬇️ Download Existing EPW File",
-                            data=f.read(),
-                            file_name=existing_epw.name,
-                            mime="application/octet-stream",
-                            key="download_existing_epw"
-                        )
-                else:
-                    if target_sensor:
-                        st.info(f"ℹ️ No weather file found for sensor `{target_sensor}` and selected time range.")
-                        st.caption("You'll need to generate a new weather file before running simulations.")
-                    else:
-                        st.warning("⚠️ No sensor data available. Please upload training data first.")
-                
-                # Input form for simulation parameters
-                with st.form("energy_simulation_form"):
-                    st.subheader("� Building Model")
-                    uploaded_file = st.file_uploader(
-                        "Upload IFC file", 
-                        type=['ifc'], 
-                        help="Upload an IFC (Industry Foundation Classes) file for building simulation"
-                    )
-                    
-                    # Check if bim2sim environment is available
-                    bim2sim_available = test_bim2sim_environment()
-                    if not bim2sim_available:
-                        st.warning("⚠️ bim2sim conda environment not detected. EnergyPlus simulation will not be available.")
-                        st.info("Make sure you have a conda environment named 'bim2sim' with bim2sim installed.")
-                    
-                    # Validate date range
-                    if start >= end:
-                        st.error("❌ Invalid date range. End date must be after start date.")
-                        simulate_button_disabled = True
-                    else:
-                        simulate_button_disabled = False
-                    
-                    # Determine EPW file existence early for use in requirements display
-                    epw_exists = existing_epw is not None
-                    
-                    # Check and display requirements status with checkmarks
-                    st.subheader("📋 Current Status") 
-                    st.info("📁 **Note:** IFC file validation will occur when you submit the form.")
-                    
-                    req_col1, req_col2 = st.columns(2)
-                    
-                    with req_col1:
-                        # Weather file requirement
-                        if epw_exists:
-                            st.success("✅ Weather file available")
-                        else:
-                            st.error("❌ Weather file required")
-                            # Debug info
-                            st.caption(f"🔍 Debug: Sensor='{target_sensor}', EPW={existing_epw}")
-                            if target_sensor:
-                                from pathlib import Path
-                                weather_dir = Path("./eplus_sim/weather")
-                                expected_file = f"weather_{target_sensor}_{start.year}_full_year.epw"
-                                st.caption(f"🔍 Looking for: {expected_file}")
-                                st.caption(f"🔍 Weather dir exists: {weather_dir.exists()}")
-                                if weather_dir.exists():
-                                    epw_files = list(weather_dir.glob("*.epw"))
-                                    st.caption(f"🔍 Found {len(epw_files)} EPW files")
-                                    for f in epw_files:
-                                        st.caption(f"  📄 {f.name}")
+                    # Preserve Energy tab selection during simulation
+                    if simulation_running or st.session_state.get('keep_energy_tab', False):
+                        logger.debug("Energy simulation active - preserving Energy tab")
+                        if st.session_state.get('active_tab', 0) != 4:  # Energy is index 4
+                            logger.info("Forcing tab selection to Energy during simulation")
+                            st.session_state.active_tab = 4  # Energy tab index
                         
-                        # Date range requirement  
-                        if not simulate_button_disabled:
-                            st.success("✅ Valid date range")
-                        else:
-                            st.error("❌ Valid date range required")
+                        st.success("🔄 **Energy Simulation Active** - Staying on Energy tab to show progress and results.")
                     
-                    with req_col2:
-                        # bim2sim environment requirement
-                        if bim2sim_available:
-                            st.success("✅ bim2sim environment available")
-                        else:
-                            st.error("❌ bim2sim environment required")
+                    if simulation_running:
+                        logger.debug("Showing simulation running message and stopping further UI rendering")
+                        st.info("⚙️ **Energy simulation in progress...** Please wait for completion.")
+                        st.stop()
                     
-                    col1, col2 = st.columns(2)
+                    else:
+                        # Main UI when simulation is NOT running
+                        st.subheader("🏗️ EnergyPlus Building Simulation")
                     
-                    # Enable buttons based on requirements we can check before form submission
-                    basic_requirements_met = (bim2sim_available and not simulate_button_disabled)
-                    
-                    # Initialize button variables
-                    generate_weather_button = False
-                    run_simulation_button = False
-                    
-                    with col1:
-                        # Generate weather file button (always enabled, allow regeneration)
-                        button_text = "🌤️ Regenerate Weather File" if epw_exists else "🌤️ Generate Weather File"
-                        generate_weather_button = st.form_submit_button(
-                            button_text, 
-                            type="secondary",
-                            help="Generate EPW weather file for the specified location and time range",
-                            disabled=simulate_button_disabled
-                        )
-                    
-                    with col2:
-                        # Run simulation button - enable if basic requirements met, validate file after submission
-                        if epw_exists:
-                            button_help = "Upload an IFC file and click to run simulation" if basic_requirements_met else "Fix environment issues first"
-                            
-                            run_simulation_button = st.form_submit_button(
-                                "🏃‍♂️ Run Simulation", 
-                                type="primary",
-                                help=button_help,
-                                disabled=not basic_requirements_met
-                            )
-                        else:
-                            button_help = "Upload an IFC file and click to generate weather + run simulation" if basic_requirements_met else "Fix environment issues first"
-                            
-                            run_simulation_button = st.form_submit_button(
-                                "🏃‍♂️ Generate Weather + Run Simulation", 
-                                type="primary",
-                                help=button_help,
-                                disabled=not basic_requirements_met
-                            )
-                
-                # Handle simulation execution - validate file after form submission
-                if generate_weather_button or run_simulation_button:
-                    logger.info(f"Simulation button clicked - Generate: {generate_weather_button}, Run: {run_simulation_button}")
-                    logger.debug(f"Selected sensor: {selected_sensor}, Target sensor: {target_sensor}")
-                    logger.debug(f"Date range: {start} to {end}")
-                    logger.debug(f"Location: lat={lat}, lon={lon}")
-                    
-                    # Now we can properly validate the uploaded file since form was submitted
-                    validation_errors = []
-                    
-                    if start >= end:
-                        validation_errors.append("Invalid date range")
-                        logger.warning(f"Invalid date range: {start} >= {end}")
-                    
-                    if run_simulation_button and uploaded_file is None:
-                        validation_errors.append("No IFC file uploaded")
-                        logger.warning("Run simulation requested but no IFC file uploaded")
-                    
-                    if run_simulation_button and not bim2sim_available:
-                        validation_errors.append("bim2sim environment not available")
-                        logger.error("Run simulation requested but bim2sim environment not available")
-                    
-                    if run_simulation_button and not epw_exists and not generate_weather_button:
-                        validation_errors.append("No weather file available")
-                        logger.warning("Run simulation requested but no weather file available")
-                    
-                    logger.debug(f"Validation check complete. Errors: {validation_errors}")
-                    
-                    # Show post-submission validation results
-                    if validation_errors:
-                        logger.error(f"Validation failed: {', '.join(validation_errors)}")
-                        st.error(f"❌ Cannot proceed: {', '.join(validation_errors)}")
+                        # Check simulation readiness
+                        # Check for IFC from session state (configured via sidebar Configure)
+                        latest_ifc_path = st.session_state.get('latest_ifc_path')
+                        space_ids = _get_space_ids()
+                        has_weather_data = len(space_ids) > 0
+                        has_ifc = latest_ifc_path is not None
                         
-                        # Show detailed requirements status after form submission
-                        st.subheader("📋 Detailed Requirements Check")
+                        # Get date range from sidebar configuration
+                        start_dt = st.session_state.get('start_dt')
+                        end_dt = st.session_state.get('end_dt')
+                        start = start_dt.date() if start_dt else date(2024, 1, 1)
+                        end = end_dt.date() if end_dt else date(2024, 1, 31)
+                        
+                        # Get target sensor from sidebar configuration
+                        target_sensor = st.session_state.get('space_filter')  # This is selected_sensor from sidebar
+                        
+                        # Requirements check
+                        simulation_ready = has_ifc and has_weather_data and target_sensor is not None
+                        
+                        # Simulation Control
+                        st.subheader("🏃‍♂️ Simulation Control")
+                        
+                        # Show requirements status
                         req_col1, req_col2 = st.columns(2)
-                        
                         with req_col1:
-                            # Weather file requirement
-                            if epw_exists:
-                                st.success("✅ Weather file available")
+                            if has_ifc:
+                                ifc_filename = Path(latest_ifc_path).name
+                                st.success(f"✅ IFC File: `{ifc_filename}`")
                             else:
-                                st.error("❌ Weather file required")
+                                st.warning("⚠️ IFC file required (use Configure button in sidebar)")
                             
-                            # IFC file requirement (now we can check uploaded_file after submission)
-                            if uploaded_file is not None:
-                                st.success("✅ IFC file uploaded")
-                                st.info(f"📄 File: {uploaded_file.name} ({uploaded_file.size} bytes)")
+                            if has_weather_data:
+                                st.success(f"✅ Weather data: {len(space_ids)} sensors")
                             else:
-                                st.error("❌ IFC file required")
+                                st.error("❌ Weather data required (upload training data)")
                         
                         with req_col2:
-                            # bim2sim environment requirement
-                            if bim2sim_available:
-                                st.success("✅ bim2sim environment available")
+                            if target_sensor:
+                                st.success(f"✅ Target sensor: `{target_sensor}` (from sidebar)")
                             else:
-                                st.error("❌ bim2sim environment required")
+                                st.warning("⚠️ Select target sensor in sidebar")
                             
-                            # Date range requirement
-                            if not simulate_button_disabled:
-                                st.success("✅ Valid date range")
+                            date_range_valid = start <= end
+                            if date_range_valid:
+                                days = (end - start).days + 1
+                                st.success(f"✅ Date range: {days} days (from sidebar)")
                             else:
-                                st.error("❌ Valid date range required")
+                                st.error("❌ Invalid date range (check sidebar)")
                         
-                        st.info("💡 **Tip:** Make sure to upload an IFC file before clicking the Run Simulation button.")
-                    
-                    else:
-                        # All validations passed, proceed with simulation
-                        logger.info("All validations passed, proceeding with simulation")
-                        # Create progress indicators
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                        try:
-                            # Determine if we need to generate weather file or use existing
-                            if existing_epw and run_simulation_button:
-                                # Use existing EPW file
-                                epw_path = existing_epw
-                                logger.info(f"Using existing weather file: {epw_path}")
-                                status_text.text("✅ Using existing weather file...")
-                                progress_bar.progress(20)
-                                st.info(f"📄 Using existing weather file: `{epw_path.name}`")
-                            else:
-                                # Step 1: Generate weather file
-                                logger.info("Starting weather file generation")
-                                status_text.text("🌤️ Generating weather file...")
-                                progress_bar.progress(20)
+                        # Main simulation button
+                        if st.button(
+                            "🏃‍♂️ Run Energy Simulation", 
+                            disabled=not simulation_ready,
+                            key="run_energy_simulation",
+                            help="Generate weather file and run complete energy simulation" if simulation_ready else "Fix requirements above first",
+                        ):
+                            if simulation_ready:
+                                # Enhanced logging for debugging
+                                logger.info(f"TRIGGER: Energy simulation button clicked")
+                                logger.info(f"TRIGGER: IFC={st.session_state.get('latest_ifc_path')}")
+                                logger.info(f"TRIGGER: Space={st.session_state.get('space_filter')}")
+                                logger.info(f"TRIGGER: Dates={st.session_state.get('start_dt')} to {st.session_state.get('end_dt')}")
                                 
-                                # Convert dates to datetime for the pipeline
-                                start_datetime = datetime.combine(start, datetime.min.time())
-                                end_datetime = datetime.combine(end, datetime.min.time())
-                                logger.debug(f"Date range for weather generation: {start_datetime} to {end_datetime}")
-                                
-                                # Use the selected sensor or default to first available sensor
-                                sensor_list = _get_sensor_ids()
-                                logger.debug(f"Available sensors: {sensor_list}")
-                                
-                                if not sensor_list:
-                                    logger.error("No sensor data available for weather generation")
-                                    st.error("❌ No sensor data available. Please upload training data first.")
-                                    st.stop()
-                                
-                                target_sensor = selected_sensor or sensor_list[0]
-                                logger.info(f"Using target sensor for weather generation: {target_sensor}")
-                                
-                                # Call the weather pipeline with full-year option
-                                logger.info("Calling generate_epw_for_location function")
-                                with st.spinner("WEATHER Generating weather file... This may take a few moments."):
-                                    epw_path = generate_epw_for_location(
-                                        sensor_id=target_sensor,
-                                        latitude=lat,
-                                        longitude=lon,
-                                        start=start_datetime,
-                                        end=end_datetime,
-                                        full_year=True  # Generate full-year EPW for EnergyPlus compatibility
-                                    )
-                                logger.info(f"Weather file generated successfully: {epw_path}")
-                                
-                                # Store weather file path in session state for potential EnergyPlus simulation
-                                st.session_state['latest_epw_path'] = epw_path
-                                st.session_state['latest_sensor_id'] = target_sensor
-                                logger.debug("Stored weather file path and sensor ID in session state")
-                                
-                                # Show success message
-                                st.success(f"✅ Weather file generated successfully: `{epw_path.name}`")
-                                progress_bar.progress(100)
-                                status_text.text("✅ Weather file generation completed!")
-                                
-                                # If this was just weather generation (not full simulation), trigger a rerun to refresh the UI
-                                if not run_simulation_button:
-                                    logger.info("Weather generation only - triggering UI refresh")
-                                    st.rerun()
-                            
-                            # If this is a full simulation request, continue with EnergyPlus
-                            if run_simulation_button and uploaded_file is not None:
-                                logger.info("Starting EnergyPlus simulation workflow")
-                                
-                                # **MAJOR FIX: Wrap the ENTIRE EnergyPlus pipeline in a spinner to prevent UI refresh**
-                                st.subheader("🏃‍♂️ Running EnergyPlus Simulation")
-                                st.info("⏳ Please wait while the simulation is running. This may take several minutes...")
-                                
-                                # Create a comprehensive spinner that blocks the entire pipeline
-                                with st.spinner("PROCESSING EnergyPlus simulation pipeline in progress... Please do not switch tabs or refresh the page."):
-                                    try:
-                                        # Disable the entire UI during simulation
-                                        st.session_state.simulation_running = True
-                                        st.session_state.prevent_rerun = True
-                                        logger.debug("Set simulation_running and prevent_rerun flags to True")
-                                        
-                                        # Step 2: Save uploaded IFC file
-                                        logger.info("Saving uploaded IFC file")
-                                        status_text.text("📁 Preparing IFC file...")
-                                        progress_bar.progress(40)
-                                        
-                                        # Create models directory and save IFC file
-                                        models_dir = Path("./eplus_sim/models")
-                                        models_dir.mkdir(parents=True, exist_ok=True)
-                                        logger.debug(f"Created models directory: {models_dir}")
-                                        
-                                        # Save uploaded file
-                                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                        ifc_filename = f"{target_sensor}_{timestamp}.ifc"
-                                        ifc_path = models_dir / ifc_filename
-                                        logger.debug(f"Saving IFC file as: {ifc_path}")
-                                        
-                                        with open(ifc_path, "wb") as f:
-                                            f.write(uploaded_file.getbuffer())
-                                        
-                                        logger.info(f"IFC file saved successfully: {ifc_path} ({uploaded_file.size} bytes)")
-                                        
-                                        # Step 3: Run EnergyPlus simulation
-                                        logger.info("Starting EnergyPlus simulation")
-                                        status_text.text("🏃‍♂️ Running EnergyPlus simulation...")
-                                        progress_bar.progress(60)
-                                        
-                                        # Call the EnergyPlus pipeline via conda run
-                                        logger.info(f"Calling run_eplus_simulation_async with IFC: {ifc_path}, EPW: {epw_path}")
-                                        simulation_results = run_eplus_simulation_async(
-                                            ifc_file_path=ifc_path,
-                                            weather_file_path=epw_path,
-                                            sensor_id=target_sensor,
-                                            project_base_dir=Path("./eplus_sim")
-                                        )
-                                        
-                                        progress_bar.progress(80)
-                                        status_text.text("📊 Processing simulation results...")
-                                        logger.info(f"EnergyPlus simulation completed. Success: {simulation_results.get('success', False)}")
-                                        
-                                        # Step 4: Process and store results (still within spinner)
-                                        if simulation_results["success"]:
-                                            logger.info("EnergyPlus simulation completed successfully")
-                                            
-                                            # **Store simulation results in database**
-                                            logger.info("Storing energy simulation results in database")
-                                            try:
-                                                storage_success = _store_energy_simulation_results(
-                                                    simulation_results, target_sensor, str(ifc_path), str(epw_path)
-                                                )
-                                                if storage_success:
-                                                    logger.info("SUCCESS Energy simulation results stored in database")
-                                                else:
-                                                    logger.warning("ERROR Failed to store energy simulation results in database")
-                                            except Exception as e:
-                                                logger.error(f"Error storing simulation results: {str(e)}", exc_info=True)
-                                            
-                                            progress_bar.progress(100)
-                                            status_text.text("✅ Simulation completed successfully!")
-                                        else:
-                                            logger.error(f"EnergyPlus simulation failed: {simulation_results.get('error', 'Unknown error')}")
-                                            progress_bar.progress(0)
-                                            status_text.text("❌ Simulation failed")
-                                        
-                                        # Re-enable UI after everything is complete
-                                        st.session_state.simulation_running = False
-                                        st.session_state.prevent_rerun = False
-                                        logger.debug("Reset simulation_running and prevent_rerun flags")
-                                    
-                                    except Exception as e:
-                                        # Make sure we reset flags even if there's an error
-                                        st.session_state.simulation_running = False
-                                        st.session_state.prevent_rerun = False
-                                        logger.error(f"Error during EnergyPlus simulation: {str(e)}", exc_info=True)
-                                        progress_bar.progress(0)
-                                        status_text.text("❌ Simulation failed")
-                                        raise  # Re-raise to show error to user
-                                
-                                # Now display results AFTER the spinner completes
-                                if simulation_results["success"]:
-                                    st.success("✔️ EnergyPlus simulation completed successfully!")
-                                    
-                                    # Display simulation results
-                                    project_path = simulation_results['project_path']
-                                    logger.info(f"Simulation results saved to: {project_path}")
-                                    st.info(f"📁 Results saved to: `{project_path}`")
-                                    
-                                    # Show database storage status
-                                    if storage_success:
-                                        st.success("💾 Energy data successfully stored in database!")
-                                    else:
-                                        st.warning("⚠️ Energy data could not be stored in database (check logs)")
-                                    
-                                    # **Visualize energy results**
-                                    logger.info("Starting energy results visualization")
-                                    # Energy tab always shows building-wide data regardless of space selection
-                                    _display_energy_results(simulation_results, "latest")
-                                    
-                                    # Show bim2sim logs if available
-                                    if simulation_results.get("process_stdout"):
-                                        logger.debug("Displaying bim2sim simulation logs")
-                                        with st.expander("📋 bim2sim Simulation Logs"):
-                                            st.text_area(
-                                                "Detailed logs from bim2sim simulation:",
-                                                value=simulation_results["process_stdout"],
-                                                height=300,
-                                                help="These are the detailed logs from the bim2sim simulation process"
-                                            )
-                                    
-                                    # Show simulation details
-                                    with st.expander("🔍 Simulation Technical Details"):
-                                        st.json(simulation_results)
-                                else:
-                                    st.error(f"❌ EnergyPlus simulation failed: {simulation_results.get('error', 'Unknown error')}")
-                                    
-                                    # Show bim2sim error logs prominently
-                                    if simulation_results.get("process_stderr"):
-                                        logger.debug("Displaying bim2sim error logs")
-                                        st.subheader("🚨 Error Logs")
-                                        st.error("**bim2sim Error Output:**")
-                                        st.text_area(
-                                            "Error details:",
-                                            value=simulation_results["process_stderr"],
-                                            height=200,
-                                            help="Error messages from the bim2sim simulation process"
-                                        )
-                                    
-                                    if simulation_results.get("process_stdout"):
-                                        with st.expander("📋 Full bim2sim Output (for debugging)"):
-                                            st.text_area(
-                                                "Complete output from bim2sim:",
-                                                value=simulation_results["process_stdout"],
-                                                height=300,
-                                                help="Complete output from the bim2sim simulation process"
-                                            )
-                                    
-                                    # Show technical error details
-                                    with st.expander("🔍 Technical Error Details"):
-                                        st.json(simulation_results)
-                            else:
-                                # Just weather file generation - display completion
-                                logger.info("Weather file generation completed successfully")
-                                progress_bar.progress(100)
-                                status_text.text("✅ Weather file generation completed!")
-                                st.success(f"✔️ Weather file successfully generated!")
-                            
-                            # Display file info (common for both paths)
-                            logger.info(f"Final weather file path: {epw_path}")
-                            st.info(f"📄 Weather file saved to: `{epw_path}`")
-                            if os.path.exists(epw_path):
-                                file_size = os.path.getsize(epw_path) / 1024  # KB
-                                logger.debug(f"Weather file size: {file_size:.1f} KB")
-                                st.metric("File Size", f"{file_size:.1f} KB")
-                                
-                                # Option to download the file
-                                with open(epw_path, 'rb') as f:
-                                    st.download_button(
-                                        label="⬇️ Download EPW File",
-                                        data=f.read(),
-                                        file_name=os.path.basename(epw_path),
-                                        mime="application/octet-stream"
-                                    )
-                            else:
-                                logger.warning(f"Weather file not found after generation: {epw_path}")
-                            
-                        except Exception as e:
-                            logger.error(f"Error during weather file generation: {str(e)}", exc_info=True)
-                            progress_bar.progress(0)
-                            status_text.text("❌ Generation failed")
-                            st.error(f"❌ Error generating weather file: {str(e)}")
+                                st.session_state.simulation_running = True
+                                st.session_state.keep_energy_tab = True
+                                logger.info("Energy simulation flags set - triggering rerun")
+                                st.rerun()
+
                 
                 # Information section
                 st.markdown("---")
@@ -4011,46 +4688,34 @@ if st.session_state.get("predicted"):
                 st.subheader("📊 Application Logs")
                 
                 with st.expander("🔍 View Application Logs"):
-                    st.info("**Note:** Detailed bim2sim logs appear here during simulation runs. Check the main application log file for complete history.")
+                    st.info("**Note:** Detailed bim2sim logs appear here during simulation runs.")
                     
                     # Option to view recent log file
-                    log_path = Path("./logs/__main__.log")
+                    log_path = Path("./logs/dashboard.app.log")
                     if log_path.exists():
                         try:
-                            # Read last 100 lines of log file
                             with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
                                 lines = f.readlines()
                                 recent_lines = lines[-100:] if len(lines) > 100 else lines
-                            
-                            log_content = ''.join(recent_lines)
+                                
                             st.text_area(
                                 "Recent application logs (last 100 lines):",
-                                value=log_content,
-                                height=400,
-                                help="This shows the most recent entries from the application log file"
+                                value=''.join(recent_lines),
+                                height=300,
+                                key="energy_logs"
                             )
-                            
-                            # Button to download full log
-                            with open(log_path, 'rb') as f:
-                                st.download_button(
-                                    label="⬇️ Download Full Log File",
-                                    data=f.read(),
-                                    file_name=f"energy_tool_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
-                                    mime="text/plain"
-                                )
-                                
                         except Exception as e:
-                            st.error(f"Could not read log file: {e}")
+                            st.error(f"Error reading log file: {e}")
                     else:
-                        st.warning("No log file found. Logs will appear here after running simulations.")
-                        
-                    # Show log file location for manual access
-                    st.caption(f"💡 **Log file location:** `{log_path.absolute()}`")
-                
+                        st.info("No log file found.")
+
+
+
+
+
             elif name == 'Energy Comfortness':
-                # ========== Energy Comfortness Tab ==========
-                st.header("🔥❄️ Energy Comfortness Analysis")
-                st.markdown("Analyze heating and cooling energy patterns for space comfort optimization.")
+                st.header("⚡🌡️ Energy & Comfort Analysis")
+                st.markdown("Correlate energy consumption with occupant comfort metrics.")
                 
                 # Get filtering parameters
                 start_dt = st.session_state.get('start_dt', None)
@@ -4060,7 +4725,7 @@ if st.session_state.get("predicted"):
                 
                 # **Try to get energy data from database only**
                 logger.info("Attempting to retrieve energy data from database")
-                energy_data = _get_energy_data_from_database(sensor_id=sel if space_filter_applied else None)
+                energy_data = _get_energy_data_from_database(space_id=sel if space_filter_applied else None)
                 
                 if energy_data:
                     logger.info("SUCCESS Using energy data from database")
@@ -4077,7 +4742,7 @@ if st.session_state.get("predicted"):
                 else:
                     logger.info("No energy data found in database")
                     st.info("📊 No energy simulation data available in database.")
-                    st.info("� Run an energy simulation to generate and store energy data.")
+                    st.info("⚡ Run an energy simulation to generate and store energy data.")
                     energy_data = None
                 
                 # ==== COMFORT DATA RETRIEVAL (INDEPENDENT OF ENERGY DATA) ====
@@ -4095,7 +4760,7 @@ if st.session_state.get("predicted"):
                     
                     # Apply space filter if specified  
                     if space_filter_applied:
-                        space_mask = comfort_data["sensor_id"] == sel
+                        space_mask = comfort_data["space_id"] == sel
                         comfort_data = comfort_data.loc[space_mask].copy()
                         logger.info(f"Applied space filter: {len(comfort_data)} records remaining")
                 
@@ -4131,16 +4796,10 @@ if st.session_state.get("predicted"):
                         
                         with col2:
                             if space_filter_applied:
-                                st.caption(f" Space: {sel}")
+                                st.caption(f"🏠 Space: {sel}")
                             else:
-                                st.caption(" All spaces")
+                                st.caption("🏠 All spaces")
                             
-                            # Create time series charts for heating and cooling
-                            col1, col2 = st.columns(2)
-                        
-                        # Create time series charts for heating and cooling
-                        col1, col2 = st.columns(2)
-                        
                         # If space filter is applied, try to match it with zone data
                         if space_filter_applied and zone_energy:
                             # Try to find matching zones
@@ -4158,499 +4817,364 @@ if st.session_state.get("predicted"):
                             else:
                                 st.warning(f"⚠️ No zones found matching '{sel}'. Showing all zones.")
                         
-                        # Heating Time Series
-                        with col1:
-                            st.markdown("### 🔥 Heating Energy Over Time")
-                            
-                            if 'heating' in energy_data and energy_data['heating'].get('hourly_data'):
-                                hourly_heating = energy_data['heating']['hourly_data'][:8760]
-                                logger.info(f"Heating timeseries data: {len(hourly_heating)} points")
-                                
-                                # Create datetime range for the chart
-                                if start_dt and end_dt:
-                                    chart_start = start_dt
-                                    chart_end = end_dt
-                                    num_days = (chart_end - chart_start).days + 1
-                                    if num_days > 0 and len(hourly_heating) < 8760:
-                                        data_points_per_day = max(1, len(hourly_heating) // num_days)
-                                        daily_avg = [np.mean(hourly_heating[i:i+data_points_per_day]) for i in range(0, len(hourly_heating), data_points_per_day)]
-                                        date_range = pd.date_range(start=chart_start, periods=len(daily_avg), freq='D')
-                                    else:
-                                        daily_avg = [np.mean(hourly_heating[i:i+24]) for i in range(0, len(hourly_heating), 24)]
-                                        date_range = pd.date_range(start=chart_start, periods=len(daily_avg), freq='D')
-                                else:
-                                    chart_start = pd.Timestamp('2024-01-01')
-                                    daily_avg = [np.mean(hourly_heating[i:i+24]) for i in range(0, len(hourly_heating), 24)]
-                                    date_range = pd.date_range(start=chart_start, periods=len(daily_avg), freq='D')
-                                
-                                logger.info(f"Created heating chart data: {len(daily_avg)} daily averages")
-                                
-                                # Create DataFrame for plotting
-                                heating_df = pd.DataFrame({
-                                    'Timestamp': date_range,
-                                    'Heating_Power_W': [float(x) for x in daily_avg]  # Ensure values are float
+                        # ==== ENERGY STATISTICS OVERVIEW ====
+                        st.markdown("#### 📊 Energy Overview")
+                        
+                        # Get energy statistics
+                        total_heating = energy_data.get('heating', {}).get('total_energy_kwh', 0) if 'heating' in energy_data else 0
+                        total_cooling = energy_data.get('cooling', {}).get('total_energy_kwh', 0) if 'cooling' in energy_data else 0
+                        total_energy = total_heating + total_cooling
+                        
+                        peak_heating = energy_data.get('heating', {}).get('peak_rate_w', 0) if 'heating' in energy_data else 0
+                        peak_cooling = energy_data.get('cooling', {}).get('peak_rate_w', 0) if 'cooling' in energy_data else 0
+                        
+                        # Statistics row
+                        stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+                        
+                        with stat_col1:
+                            st.metric("Total Energy", f"{total_energy:,.1f} kWh")
+                        with stat_col2:
+                            st.metric("Total Heating", f"{total_heating:,.1f} kWh")
+                        with stat_col3:
+                            st.metric("Total Cooling", f"{total_cooling:,.1f} kWh")
+                        with stat_col4:
+                            heating_ratio = (total_heating / total_energy * 100) if total_energy > 0 else 0
+                            st.metric("Heating Share", f"{heating_ratio:.1f}%")
+                        
+                        # ==== PIE CHART AND PEAK POWER ====
+                        pie_col, peak_col = st.columns([2, 1])
+                        
+                        with pie_col:
+                            if total_energy > 0:
+                                # Create pie chart data
+                                pie_data = pd.DataFrame({
+                                    'Energy Type': ['Heating', 'Cooling'],
+                                    'Energy (kWh)': [total_heating, total_cooling],
+                                    'Percentage': [heating_ratio, 100 - heating_ratio]
                                 })
                                 
-                                logger.info(f"Heating DataFrame shape: {heating_df.shape}")
-                                logger.info(f"Heating DataFrame columns: {heating_df.columns.tolist()}")
-                                
-                                # Create Altair chart
-                                heating_chart = alt.Chart(heating_df).mark_line(
-                                    point=True, color='red', strokeWidth=2
-                                ).add_params(
-                                    alt.selection_interval(bind='scales')
+                                # Create pie chart
+                                pie_chart = alt.Chart(pie_data).mark_arc(
+                                    innerRadius=60,
+                                    outerRadius=120,
+                                    strokeWidth=2,
+                                    stroke='white'
                                 ).encode(
-                                    x=alt.X('Timestamp:T', title='Date', axis=alt.Axis(format='%d %b %Y', labelAngle=-45)),
-                                    y=alt.Y('Heating_Power_W:Q', title='Heating Power (W)'),
+                                    theta=alt.Theta('Energy (kWh):Q'),
+                                    color=alt.Color(
+                                        'Energy Type:N',
+                                        scale=alt.Scale(domain=['Heating', 'Cooling'], range=['#ff4444', '#4488ff']),
+                                        legend=alt.Legend(title="Energy Type", orient="right")
+                                    ),
                                     tooltip=[
-                                        alt.Tooltip('Timestamp:T', title='Date', format='%d %b %Y'),
-                                        alt.Tooltip('Heating_Power_W:Q', title='Heating Power (W)', format='.1f')
+                                        alt.Tooltip('Energy Type:N', title='Type'),
+                                        alt.Tooltip('Energy (kWh):Q', title='Energy (kWh)', format='.1f'),
+                                        alt.Tooltip('Percentage:Q', title='Share (%)', format='.1f')
                                     ]
                                 ).properties(
-                                    width=350,
-                                    height=300,
-                                    title='Daily Average Heating Power'
+                                    title='Heating vs Cooling Energy Distribution'
                                 )
                                 
-                                st.altair_chart(heating_chart, use_container_width=True)
-                                
-                                # Show heating stats
-                                total_heating = energy_data['heating']['total_energy_kwh']
-                                peak_heating = energy_data['heating']['peak_rate_w']
-                                st.metric("Total Heating", f"{total_heating:,.1f} kWh")
-                                st.metric("Peak Heating", f"{peak_heating:,.0f} W")
-                                
+                                st.altair_chart(pie_chart, use_container_width=True)
                             else:
-                                st.info("No heating data available")
+                                st.info("No energy data available for pie chart")
                         
-                        # Cooling Time Series
-                        with col2:
-                            st.markdown("### ❄️ Cooling Energy Over Time")
+                        with peak_col:
+                            st.markdown("**Peak Power**")
+                            st.metric("Peak Heating", f"{peak_heating/1000.0:,.2f} kW")
+                            st.metric("Peak Cooling", f"{peak_cooling/1000.0:,.2f} kW")
                             
-                            if 'cooling' in energy_data and energy_data['cooling'].get('hourly_data'):
-                                hourly_cooling = energy_data['cooling']['hourly_data'][:8760]
-                                
-                                # Create datetime range for the chart
-                                if start_dt and end_dt:
-                                    chart_start = start_dt
-                                    chart_end = end_dt
-                                    num_days = (chart_end - chart_start).days + 1
-                                    if num_days > 0 and len(hourly_cooling) < 8760:
-                                        data_points_per_day = max(1, len(hourly_cooling) // num_days)
-                                        daily_avg = [np.mean(hourly_cooling[i:i+data_points_per_day]) for i in range(0, len(hourly_cooling), data_points_per_day)]
-                                        date_range = pd.date_range(start=chart_start, periods=len(daily_avg), freq='D')
-                                    else:
-                                        daily_avg = [np.mean(hourly_cooling[i:i+24]) for i in range(0, len(hourly_cooling), 24)]
-                                        date_range = pd.date_range(start=chart_start, periods=len(daily_avg), freq='D')
-                                else:
-                                    chart_start = pd.Timestamp('2024-01-01')
-                                    daily_avg = [np.mean(hourly_cooling[i:i+24]) for i in range(0, len(hourly_cooling), 24)]
-                                    date_range = pd.date_range(start=chart_start, periods=len(daily_avg), freq='D')
-                                
-                                # Create DataFrame for plotting
-                                cooling_df = pd.DataFrame({
-                                    'Timestamp': date_range,
-                                    'Cooling_Power_W': [float(x) for x in daily_avg]  # Ensure values are float
-                                })
-                                
-                                # Create Altair chart
-                                cooling_chart = alt.Chart(cooling_df).mark_line(
-                                    point=True, color='blue', strokeWidth=2
-                                ).add_params(
-                                    alt.selection_interval(bind='scales')
-                                ).encode(
-                                    x=alt.X('Timestamp:T', title='Date', axis=alt.Axis(format='%d %b %Y', labelAngle=-45)),
-                                    y=alt.Y('Cooling_Power_W:Q', title='Cooling Power (W)'),
-                                    tooltip=[
-                                        alt.Tooltip('Timestamp:T', title='Date', format='%d %b %Y'),
-                                        alt.Tooltip('Cooling_Power_W:Q', title='Cooling Power (W)', format='.1f')
-                                    ]
-                                ).properties(
-                                    width=350,
-                                    height=300,
-                                    title='Daily Average Cooling Power'
-                                )
-                                
-                                st.altair_chart(cooling_chart, use_container_width=True)
-                                
-                                # Show cooling stats
-                                total_cooling = energy_data['cooling']['total_energy_kwh']
-                                peak_cooling = energy_data['cooling']['peak_rate_w']
-                                st.metric("Total Cooling", f"{total_cooling:,.1f} kWh")
-                                st.metric("Peak Cooling", f"{peak_cooling:,.0f} W")
-                                
+                            if peak_heating > 0 or peak_cooling > 0:
+                                peak_total = max(peak_heating, peak_cooling) / 1000.0
+                                st.metric("Peak Total", f"{peak_total:,.2f} kW")
+                        
+                        # ==== TIME SERIES CHARTS ====
+                        st.markdown("#### 📈 Energy Time Series")
+                        
+                        # Get hourly data (initialize variables to avoid scope issues)
+                        heating_hourly = []
+                        cooling_hourly = []
+                        
+                        if 'heating' in energy_data:
+                            heating_hourly = energy_data.get('heating', {}).get('hourly_data', [])
+                        if 'cooling' in energy_data:
+                            cooling_hourly = energy_data.get('cooling', {}).get('hourly_data', [])
+                        
+                        if heating_hourly or cooling_hourly:
+                            # Create datetime range
+                            if start_dt and end_dt:
+                                chart_start = start_dt
+                                chart_end = end_dt
+                                max_hours = ((chart_end - chart_start).days + 1) * 24
+                                num_hours = min(max(len(heating_hourly), len(cooling_hourly)), max_hours)
+                                date_range = pd.date_range(start=chart_start, periods=num_hours, freq='H')
                             else:
-                                st.info("No cooling data available")
-                        
-                        # Combined Analysis
-                        if 'heating' in energy_data and 'cooling' in energy_data:
-                            st.subheader("⚙️ Combined Energy Analysis")
+                                chart_start = pd.Timestamp('2024-01-01')
+                                num_hours = max(len(heating_hourly), len(cooling_hourly))
+                                date_range = pd.date_range(start=chart_start, periods=num_hours, freq='H')
                             
-                            # Calculate energy balance
-                            total_heating = energy_data['heating']['total_energy_kwh']
-                            total_cooling = energy_data['cooling']['total_energy_kwh']
-                            total_energy = total_heating + total_cooling
+                            # Create individual charts row
+                            heat_col, cool_col = st.columns(2)
                             
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Total Energy", f"{total_energy:,.1f} kWh")
-                            with col2:
-                                heating_ratio = (total_heating / total_energy * 100) if total_energy > 0 else 0
-                                st.metric("Heating Share", f"{heating_ratio:.1f}%")
-                            with col3:
-                                cooling_ratio = (total_cooling / total_energy * 100) if total_energy > 0 else 0
-                                st.metric("Cooling Share", f"{cooling_ratio:.1f}%")
-                            
-                            # Combined time series chart
-                            if energy_data['heating'].get('hourly_data') and energy_data['cooling'].get('hourly_data'):
-                                st.markdown("### 🔥❄️ Combined Heating & Cooling")
-                                
-                                # Prepare data for combined chart
-                                hourly_heating = energy_data['heating']['hourly_data'][:8760]
-                                hourly_cooling = energy_data['cooling']['hourly_data'][:8760]
-                                
-                                # Create datetime range
-                                if start_dt and end_dt:
-                                    chart_start = start_dt
-                                    num_days = (end_dt - start_dt).days + 1
-                                    if num_days > 0 and len(hourly_heating) < 8760:
-                                        data_points_per_day = max(1, len(hourly_heating) // num_days)
-                                        heating_daily = [np.mean(hourly_heating[i:i+data_points_per_day]) for i in range(0, len(hourly_heating), data_points_per_day)]
-                                        cooling_daily = [np.mean(hourly_cooling[i:i+data_points_per_day]) for i in range(0, len(hourly_cooling), data_points_per_day)]
-                                        date_range = pd.date_range(start=chart_start, periods=len(heating_daily), freq='D')
-                                    else:
-                                        heating_daily = [np.mean(hourly_heating[i:i+24]) for i in range(0, len(hourly_heating), 24)]
-                                        cooling_daily = [np.mean(hourly_cooling[i:i+24]) for i in range(0, len(hourly_cooling), 24)]
-                                        date_range = pd.date_range(start=chart_start, periods=len(heating_daily), freq='D')
+                            # Heating Time Series
+                            with heat_col:
+                                if heating_hourly:
+                                    # Ensure arrays have the same length
+                                    min_len = min(len(heating_hourly), len(date_range))
+                                    heating_df = pd.DataFrame({
+                                        'Time': date_range[:min_len],
+                                        'Power (kW)': [float(x) / 1000.0 for x in heating_hourly[:min_len]]
+                                    })
+                                    
+                                    heating_chart = alt.Chart(heating_df).mark_line(
+                                        color='#ff4444', strokeWidth=2
+                                    ).encode(
+                                        x=alt.X('Time:T', title='Date & Time', axis=alt.Axis(format='%d %b %H:%M', labelAngle=-45)),
+                                        y=alt.Y('Power (kW):Q', title=''),
+                                        tooltip=[
+                                            alt.Tooltip('Time:T', title='Date & Time', format='%d %b %Y %H:%M'),
+                                            alt.Tooltip('Power (kW):Q', title='Heating Power (kW)', format='.2f')
+                                        ]
+                                    ).properties(
+                                        title='Heating Power Over Time',
+                                        height=300
+                                    )
+                                    
+                                    st.altair_chart(heating_chart, use_container_width=True)
                                 else:
-                                    chart_start = pd.Timestamp('2024-01-01')
-                                    heating_daily = [np.mean(hourly_heating[i:i+24]) for i in range(0, len(hourly_heating), 24)]
-                                    cooling_daily = [np.mean(hourly_cooling[i:i+24]) for i in range(0, len(hourly_cooling), 24)]
-                                    date_range = pd.date_range(start=chart_start, periods=len(heating_daily), freq='D')
+                                    st.info("No heating data available")
+                            
+                            # Cooling Time Series  
+                            with cool_col:
+                                if cooling_hourly:
+                                    # Ensure arrays have the same length
+                                    min_len = min(len(cooling_hourly), len(date_range))
+                                    cooling_df = pd.DataFrame({
+                                        'Time': date_range[:min_len],
+                                        'Power (kW)': [float(x) / 1000.0 for x in cooling_hourly[:min_len]]
+                                    })
+                                    
+                                    cooling_chart = alt.Chart(cooling_df).mark_line(
+                                        color='#4488ff', strokeWidth=2
+                                    ).encode(
+                                        x=alt.X('Time:T', title='Date & Time', axis=alt.Axis(format='%d %b %H:%M', labelAngle=-45)),
+                                        y=alt.Y('Power (kW):Q', title=''),
+                                        tooltip=[
+                                            alt.Tooltip('Time:T', title='Date & Time', format='%d %b %Y %H:%M'),
+                                            alt.Tooltip('Power (kW):Q', title='Cooling Power (kW)', format='.2f')
+                                        ]
+                                    ).properties(
+                                        title='Cooling Power Over Time',
+                                        height=300
+                                    )
+                                    
+                                    st.altair_chart(cooling_chart, use_container_width=True)
+                                else:
+                                    st.info("No cooling data available")
+                            
+                            # Combined Time Series
+                            if heating_hourly and cooling_hourly:
+                                st.markdown("#### 🔥❄️ Combined Heating & Cooling")
                                 
                                 # Create combined DataFrame
                                 combined_data = []
-                                for i, timestamp in enumerate(date_range):
-                                    if i < len(heating_daily):
-                                        combined_data.append({'Timestamp': timestamp, 'Energy_W': float(heating_daily[i]), 'Type': 'Heating'})
-                                    if i < len(cooling_daily):
-                                        combined_data.append({'Timestamp': timestamp, 'Energy_W': float(cooling_daily[i]), 'Type': 'Cooling'})
+                                max_len = min(len(heating_hourly), len(cooling_hourly), len(date_range))
+                                
+                                for i in range(max_len):
+                                    timestamp = date_range[i]
+                                    combined_data.append({
+                                        'Time': timestamp,
+                                        'Power (kW)': float(heating_hourly[i]) / 1000.0,
+                                        'Type': 'Heating'
+                                    })
+                                    combined_data.append({
+                                        'Time': timestamp,
+                                        'Power (kW)': float(cooling_hourly[i]) / 1000.0,
+                                        'Type': 'Cooling'
+                                    })
                                 
                                 combined_df = pd.DataFrame(combined_data)
                                 
                                 # Create combined chart
                                 combined_chart = alt.Chart(combined_df).mark_line(
-                                    point=True, strokeWidth=2
-                                ).add_params(
-                                    alt.selection_interval(bind='scales')
+                                    strokeWidth=2
                                 ).encode(
-                                    x=alt.X('Timestamp:T', title='Date', axis=alt.Axis(format='%d %b %Y', labelAngle=-45)),
-                                    y=alt.Y('Energy_W:Q', title='Power (W)'),
-                                    color=alt.Color('Type:N', scale=alt.Scale(domain=['Heating', 'Cooling'], range=['red', 'blue'])),
+                                    x=alt.X('Time:T', title='Date & Time', axis=alt.Axis(format='%d %b %H:%M', labelAngle=-45)),
+                                    y=alt.Y('Power (kW):Q', title=''),
+                                    color=alt.Color(
+                                        'Type:N',
+                                        scale=alt.Scale(domain=['Heating', 'Cooling'], range=['#ff4444', '#4488ff']),
+                                        legend=alt.Legend(title="Energy Type")
+                                    ),
                                     tooltip=[
-                                        alt.Tooltip('Timestamp:T', title='Date', format='%d %b %Y'),
-                                        alt.Tooltip('Energy_W:Q', title='Power (W)', format='.1f'),
+                                        alt.Tooltip('Time:T', title='Date & Time', format='%d %b %Y %H:%M'),
+                                        alt.Tooltip('Power (kW):Q', title='Power (kW)', format='.2f'),
                                         alt.Tooltip('Type:N', title='Energy Type')
                                     ]
                                 ).properties(
-                                    width=700,
-                                    height=400,
-                                    title='Daily Average Heating & Cooling Power Comparison'
+                                    title='Combined Heating & Cooling Power Over Time',
+                                    height=400
                                 )
                                 
                                 st.altair_chart(combined_chart, use_container_width=True)
                         
-                        # Space-specific filtering results
-                        if space_filter_applied and filtered_zones and zone_energy:
-                            st.subheader(f" Space-Specific Analysis: {sel}")
-                            
-                            # Calculate totals for filtered zones
-                            filtered_heating = sum(zone_energy[zone].get('heating_kwh', 0) for zone in filtered_zones)
-                            filtered_cooling = sum(zone_energy[zone].get('cooling_kwh', 0) for zone in filtered_zones)
-                            filtered_total = filtered_heating + filtered_cooling
-                            
-                            if filtered_total > 0:
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric(f"{sel} - Total Energy", f"{filtered_total:,.1f} kWh")
-                                with col2:
-                                    st.metric(f"{sel} - Heating", f"{filtered_heating:,.1f} kWh")
-                                with col3:
-                                    st.metric(f"{sel} - Cooling", f"{filtered_cooling:,.1f} kWh")
-                                
-                                # Show percentage of total building energy
-                                total_building_energy = total_heating + total_cooling
-                                if total_building_energy > 0:
-                                    space_percentage = (filtered_total / total_building_energy) * 100
-                                    st.info(f"📊 **{sel}** accounts for **{space_percentage:.1f}%** of total building energy consumption")
-                            else:
-                                st.warning(f"No energy data found for spaces matching '{sel}'")
-                    
+                        else:
+                            st.info("No hourly energy data available for time series charts")
+                        
                     else:
                         st.info("ℹ️ No energy simulation data available in database.")
                         st.info("💡 Run an energy simulation to generate and store energy data.")
-                        st.markdown("""
-                        **To generate energy data:**
-                        1. Go to the **Energy** tab
-                        2. Upload an IFC building model file
-                        3. Generate weather data for your location
-                        4. Run an EnergyPlus simulation
-                        5. Return here to analyze the energy patterns
-                        """)
                 
                 # ==== COMFORT ANALYSIS TAB ====
                 with energy_comfort_tabs[1]:
-                            logger.info("Entering Comfort Analysis tab")
-                            st.subheader("🌡️ Comfort Analysis")
-                            
-                            if comfort_data is not None and len(comfort_data) > 0:
-                                logger.info(f"Processing comfort data with {len(comfort_data)} records")
-                                
-                                # *** CRITICAL PERFORMANCE FIX ***
-                                # Sample large datasets to prevent browser hanging
-                                # SAMPLE_SIZE = 50000  # Maximum records to display
-                                # if len(comfort_data) > SAMPLE_SIZE:
-                                #     logger.warning(f"Large dataset detected ({len(comfort_data)} records). Sampling to {SAMPLE_SIZE} records for visualization.")
-                                #     st.warning(f"WARNING **Large dataset detected!** Showing a representative sample of {SAMPLE_SIZE:,} records out of {len(comfort_data):,} total records.")
-                                    
-                                #     # Use systematic sampling to maintain temporal distribution
-                                #     step = len(comfort_data) // SAMPLE_SIZE
-                                #     comfort_data_display = comfort_data.iloc[::step].copy()
-                                #     logger.info(f"Sampled dataset: {len(comfort_data_display)} records (every {step}th record)")
-                                # else:
-                                #     comfort_data_display = comfort_data.copy()
-                                
-                                # Use full dataset for now (sampling logic commented out)
-                                comfort_data_display = comfort_data.copy()
-                                
-                                # PMV/PPD Overview with Overall Comfort
-                                col1, col2, col3, col4, col5 = st.columns(5)
-                                
-                                logger.info("Calculating PMV/PPD metrics...")
-                                with col1:
-                                    avg_pmv = comfort_data['PMV_pred'].mean() if 'PMV_pred' in comfort_data.columns else 0
-                                    st.metric("Average PMV", f"{avg_pmv:.2f}")
-                                
-                                with col2:
-                                    avg_ppd = comfort_data['PPD_pred'].mean() if 'PPD_pred' in comfort_data.columns else 0
-                                    st.metric("Average PPD", f"{avg_ppd:.1f}%")
-                                
-                                logger.info("Calculating overall comfort metric...")
-                                with col3:
-                                    # Use overall_comfort from database if available, otherwise calculate it
-                                    if 'overall_comfort' in comfort_data.columns and comfort_data['overall_comfort'].notna().any():
-                                        avg_overall = comfort_data['overall_comfort'].mean()
-                                    else:
-                                        # Fallback: calculate on the fly if not in database
-                                        logger.info("Calculating overall comfort on-the-fly (this may take a moment for large datasets)...")
-                                        temp_df = comfort_data_display.copy()  # Use sampled data for calculation
-                                        temp_df['overall_comfort'] = _calculate_overall_comfort(temp_df)
-                                        avg_overall = temp_df['overall_comfort'].mean() if temp_df['overall_comfort'].notna().any() else 0
-                                    st.metric("Overall Comfort", f"{avg_overall:.2f}", help="Weighted average of all comfort metrics (scale: 0-4, where 4 is best)")
-                                
-                                logger.info("Calculating visual and acoustic comfort metrics...")
-                                with col4:
-                                    comfort_score = comfort_data['vis_score_pred'].mean() if 'vis_score_pred' in comfort_data.columns else 0
-                                    st.metric("Visual Comfort", f"{comfort_score:.2f}")
-                                
-                                with col5:
-                                    annoyance_level = comfort_data['annoy_pred'].mean() if 'annoy_pred' in comfort_data.columns else 0
-                                    st.metric("Acoustic Annoyance", f"{annoyance_level:.2f}")
-                                
-                                # Comfort Classes Distribution
-                                logger.info("Starting comfort classes distribution analysis...")
-                                st.markdown("### 🏷️ Comfort Classes Distribution")
-                                
-                                # Overall Comfort Class (displayed prominently)
-                                if 'overall_comfort_class' in comfort_data.columns:
-                                    logger.info("Creating overall comfort class pie chart...")
-                                    st.markdown("#### 🎯 Overall Comfort Class")
-                                    _pie_chart(comfort_data_display, 'overall_comfort_class', title="Overall Comfort Distribution", context="comfort_analysis")
-                                    logger.info("Overall comfort class pie chart completed")
-                                    st.markdown("---")
-                                
-                                logger.info("Processing primary comfort classes...")
-                                comfort_class_cols = ['thermal_class', 'visual_class', 'acoustic_class']
-                                available_comfort_cols = [col for col in comfort_class_cols if col in comfort_data.columns]
-                                logger.info(f"Available primary comfort columns: {available_comfort_cols}")
-                                
-                                if available_comfort_cols:
-                                    st.markdown("#### 🌡️ Primary Comfort Classes")
-                                    pie_cols = st.columns(len(available_comfort_cols))
-                                    for idx, class_col in enumerate(available_comfort_cols):
-                                        logger.info(f"Creating pie chart for {class_col}...")
-                                        with pie_cols[idx]:
-                                            _pie_chart(comfort_data_display, class_col, title=DISPLAY.get(class_col, class_col.replace('_', ' ').title()), context="comfort_analysis")
-                                        logger.info(f"Completed pie chart for {class_col}")
-                                
-                                # IAQ Comfort Classes
-                                logger.info("Processing IAQ comfort classes...")
-                                st.markdown("### 🌬️ Indoor Air Quality Comfort")
-                                
-                                iaq_comfort_cols = ['co2_comfort_class', 'co_comfort_class', 'tvoc_comfort_class', 'pm25_comfort_class', 'pm10_comfort_class']
-                                available_iaq_cols = [col for col in iaq_comfort_cols if col in comfort_data.columns]
-                                logger.info(f"Available IAQ comfort columns: {available_iaq_cols}")
-                                
-                                if available_iaq_cols:
-                                    logger.info("Creating IAQ pie charts...")
-                                    iaq_pie_cols = st.columns(min(3, len(available_iaq_cols)))
-                                    for idx, class_col in enumerate(available_iaq_cols[:3]):  # Show first 3
-                                        logger.info(f"Creating IAQ pie chart for {class_col}...")
-                                        with iaq_pie_cols[idx % 3]:
-                                            _pie_chart(comfort_data_display, class_col, title=DISPLAY.get(class_col, class_col.replace('_', ' ').title()), context="comfort_analysis")
-                                        logger.info(f"Completed IAQ pie chart for {class_col}")
-                                    
-                                    # Second row if more than 3
-                                    if len(available_iaq_cols) > 3:
-                                        logger.info("Creating second row of IAQ pie charts...")
-                                        iaq_pie_cols2 = st.columns(len(available_iaq_cols) - 3)
-                                        for idx, class_col in enumerate(available_iaq_cols[3:]):
-                                            with iaq_pie_cols2[idx]:
-                                                _pie_chart(comfort_data_display, class_col, title=DISPLAY.get(class_col, class_col.replace('_', ' ').title()), context="comfort_analysis")
-                                
-                                # Comfort Time Series
-                                st.markdown("### � Comfort Time Series")
-                                
-                                # Overall Comfort Time Series
-                                if 'overall_comfort' in comfort_data.columns and comfort_data['overall_comfort'].notna().any():
-                                    logger.info("Creating overall comfort time series chart...")
-                                    st.markdown("#### 🎯 Overall Comfort Over Time")
-                                    
-                                    logger.info("Preparing overall comfort data for charting...")
-                                    # Use sampled data for time series charts
-                                    chart_data = comfort_data_display[comfort_data_display['overall_comfort'].notna()].copy()
-                                    
-                                    if len(chart_data) > 0:
-                                        logger.info(f"Creating overall comfort DataFrame with {len(chart_data)} data points...")
-                                        
-                                        # Prepare data for chart - simplified approach
-                                        chart_data = chart_data[['time_end', 'overall_comfort']].rename(columns={
-                                            'time_end': 'Timestamp',
-                                            'overall_comfort': 'Overall_Comfort'
-                                        })
-                                        
-                                        logger.info("Creating overall comfort Altair chart...")
-                                        overall_chart = alt.Chart(chart_data).mark_line(
-                                            point=True, strokeWidth=3, color='#2E8B57'
-                                        ).add_params(
-                                            alt.selection_interval(bind='scales')
-                                        ).encode(
-                                            x=alt.X('Timestamp:T', title='Time', axis=alt.Axis(format='%d %b %Y', labelAngle=-45)),
-                                            y=alt.Y('Overall_Comfort:Q', title='Overall Comfort Score', scale=alt.Scale(domain=[0, 4])),
-                                            tooltip=[
-                                                alt.Tooltip('Timestamp:T', title='Time', format='%d %b %Y %H:%M'),
-                                                alt.Tooltip('Overall_Comfort:Q', title='Overall Comfort', format='.2f')
-                                            ]
-                                        ).properties(
-                                            width=700,
-                                            height=300,
-                                            title='Overall Comfort Score Over Time (Scale: 0-4, where 4 is best)'
-                                        )
-                                        
-                                        logger.info("Displaying overall comfort chart...")
-                                        st.altair_chart(overall_chart, use_container_width=True)
-                                        logger.info("Overall comfort chart displayed successfully")
-                                        
-                                        # Show interpretation
-                                        avg_comfort = comfort_data['overall_comfort'].mean()
-                                        if avg_comfort >= 3.5:
-                                            st.success(f"COMPLETE **Excellent overall comfort** (Average: {avg_comfort:.2f}/4)")
-                                        elif avg_comfort >= 2.5:
-                                            st.info(f"👍 **Good overall comfort** (Average: {avg_comfort:.2f}/4)")
-                                        elif avg_comfort >= 1.5:
-                                            st.warning(f"WARNING **Moderate overall comfort** (Average: {avg_comfort:.2f}/4)")
-                                        else:
-                                            st.error(f"ERROR **Poor overall comfort** (Average: {avg_comfort:.2f}/4)")
-                                        
-                                        # Export button for overall comfort data
-                                        csv_bytes = chart_data.to_csv(index=False).encode("utf-8")
-                                        st.download_button(
-                                            "Export Overall Comfort CSV",
-                                            data=csv_bytes,
-                                            file_name=f"overall_comfort_{datetime.now(tz=timezone.utc):%Y%m%dT%H%M%S}.csv",
-                                            mime="text/csv",
-                                            type="secondary",
-                                            key="csv_overall_comfort",
-                                        )
-                                else:
-                                    st.info("ℹ️ Overall Comfort data not available. Run new predictions to generate this metric.")
-                                
-                                # PMV/PPD Time Series
-                                if 'PMV_pred' in comfort_data.columns and 'PPD_pred' in comfort_data.columns:
-                                    logger.info("Creating PMV & PPD time series chart...")
-                                    st.markdown("#### 🌡️ PMV & PPD Over Time")
-                                    
-                                    logger.info("Preparing PMV/PPD data for charting...")
-                                    # Use sampled data and vectorized approach
-                                    chart_data = comfort_data_display[['time_end', 'PMV_pred', 'PPD_pred']].dropna()
-                                    
-                                    if len(chart_data) > 0:
-                                        logger.info(f"Creating PMV/PPD DataFrame with {len(chart_data)} data points...")
-                                        
-                                        # Melt the data for easier plotting
-                                        pmv_ppd_df = pd.melt(
-                                            chart_data,
-                                            id_vars=['time_end'],
-                                            value_vars=['PMV_pred', 'PPD_pred'],
-                                            var_name='Metric',
-                                            value_name='Value'
-                                        )
-                                        pmv_ppd_df['Metric'] = pmv_ppd_df['Metric'].map({
-                                            'PMV_pred': 'PMV',
-                                            'PPD_pred': 'PPD (%)'
-                                        })
-                                        pmv_ppd_df = pmv_ppd_df.rename(columns={'time_end': 'Timestamp'})
-                                        
-                                        logger.info("Creating PMV/PPD Altair chart...")
-                                        pmv_ppd_chart = alt.Chart(pmv_ppd_df).mark_line(
-                                            point=True, strokeWidth=2
-                                        ).add_params(
-                                            alt.selection_interval(bind='scales')
-                                        ).encode(
-                                            x=alt.X('Timestamp:T', title='Time', axis=alt.Axis(format='%d %b %Y', labelAngle=-45)),
-                                            y=alt.Y('Value:Q', title='Value'),
-                                            color=alt.Color('Metric:N', scale=alt.Scale(domain=['PMV', 'PPD (%)'], range=['blue', 'red'])),
-                                            tooltip=[
-                                                alt.Tooltip('Timestamp:T', title='Time', format='%d %b %Y %H:%M'),
-                                            alt.Tooltip('Value:Q', title='Value', format='.2f'),
-                                            alt.Tooltip('Metric:N', title='Metric')
-                                            ]
-                                        ).properties(
-                                            width=700,
-                                            height=300,
-                                            title='PMV and PPD Over Time'
-                                        ).resolve_scale(
-                                            y='independent'
-                                        )
-                                        
-                                        logger.info("Displaying PMV/PPD chart...")
-                                        st.altair_chart(pmv_ppd_chart, use_container_width=True)
-                                        logger.info("PMV/PPD chart displayed successfully")
-                                else:
-                                    st.info("ℹ️ No PMV/PPD data available for visualization.")
-                                    
-                                # Comfort Class Time Series
-                                logger.info("Preparing comfort class time series...")
-                                comfort_class_timeseries_cols = [col for col in comfort_class_cols if col in comfort_data.columns]
-                                
-                                # Add overall comfort class if available
-                                if 'overall_comfort_class' in comfort_data.columns:
-                                    comfort_class_timeseries_cols.append('overall_comfort_class')
-                                    
-                                logger.info(f"Available comfort class timeseries columns: {comfort_class_timeseries_cols}")
-                                
-                                if comfort_class_timeseries_cols:
-                                    logger.info("Creating comfort class time series...")
-                                    st.markdown("#### 🏷️ Comfort Classes Over Time")
-                                    _class_timeseries(comfort_data_display, comfort_class_timeseries_cols, title="Comfort Classes Over Time")
-                                    logger.info("Comfort class time series completed")
-                                
-                                logger.info("Comfort Analysis tab processing completed successfully")
-                            
+                    st.subheader("🌡️ Comfort Analysis")
+                    
+                    if comfort_data is not None and len(comfort_data) > 0:
+                        logger.info(f"Processing comfort data with {len(comfort_data)} records")
+                        
+                        # Use full dataset for now
+                        comfort_data_display = comfort_data.copy()
+                        
+                        # PMV/PPD Overview with Overall Comfort
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        
+                        logger.info("Calculating PMV/PPD metrics...")
+                        with col1:
+                            avg_pmv = comfort_data['PMV_pred'].mean() if 'PMV_pred' in comfort_data.columns else 0
+                            st.metric("Average PMV", f"{avg_pmv:.2f}")
+                        
+                        with col2:
+                            avg_ppd = comfort_data['PPD_pred'].mean() if 'PPD_pred' in comfort_data.columns else 0
+                            st.metric("Average PPD", f"{avg_ppd:.1f}%")
+                        
+                        logger.info("Calculating overall comfort metric...")
+                        with col3:
+                            # Use overall_comfort from database if available, otherwise calculate it
+                            if 'overall_comfort' in comfort_data.columns and comfort_data['overall_comfort'].notna().any():
+                                avg_overall = comfort_data['overall_comfort'].mean()
                             else:
-                                logger.info("No comfort data available for analysis")
-                                st.info("ℹ️ No comfort data available. Run predictions to generate comfort analysis.")
-                
+                                # Fallback: calculate on the fly if not in database
+                                logger.info("Calculating overall comfort on-the-fly...")
+                                temp_df = comfort_data_display.copy()
+                                temp_df['overall_comfort'] = _calculate_overall_comfort(temp_df)
+                                avg_overall = temp_df['overall_comfort'].mean() if temp_df['overall_comfort'].notna().any() else 0
+                            st.metric("Overall Comfort", f"{avg_overall:.2f}", help="Weighted average of all comfort metrics (scale: 0-4, where 4 is best)")
+                        
+                        with col4:
+                            comfort_score = comfort_data['vis_score_pred'].mean() if 'vis_score_pred' in comfort_data.columns else 0
+                            st.metric("Visual Comfort", f"{comfort_score:.2f}")
+                        
+                        with col5:
+                            annoyance_level = comfort_data['annoy_pred'].mean() if 'annoy_pred' in comfort_data.columns else 0
+                            st.metric("Acoustic Annoyance", f"{annoyance_level:.2f}")
+                        
+                        # Overall Comfort Analysis
+                        if 'overall_comfort' in comfort_data.columns and comfort_data['overall_comfort'].notna().any():
+                            st.markdown("#### 📊 Overall Comfort Analysis")
+                            
+                            # Create time series chart for overall comfort
+                            chart_data = comfort_data_display[['time_end', 'overall_comfort']].copy()
+                            chart_data = chart_data.dropna()
+                            
+                            if len(chart_data) > 0:
+                                overall_chart = alt.Chart(chart_data).mark_line(
+                                    point=True, strokeWidth=2
+                                ).add_selection(
+                                    alt.selection_interval(bind='scales')
+                                ).encode(
+                                    x=alt.X('time_end:T', title='Time'),
+                                    y=alt.Y('overall_comfort:Q', title='', scale=alt.Scale(domain=[0, 4])),
+                                    tooltip=['time_end:T', 'overall_comfort:Q']
+                                ).properties(
+                                    title='Overall Comfort Score Over Time (Scale: 0-4, where 4 is best)'
+                                )
+                                
+                                st.altair_chart(overall_chart, use_container_width=True)
+                                
+                                # Show interpretation
+                                avg_comfort = comfort_data['overall_comfort'].mean()
+                                if avg_comfort >= 3.5:
+                                    st.success(f"🎉 **Excellent overall comfort** (Average: {avg_comfort:.2f}/4)")
+                                elif avg_comfort >= 2.5:
+                                    st.info(f"👍 **Good overall comfort** (Average: {avg_comfort:.2f}/4)")
+                                elif avg_comfort >= 1.5:
+                                    st.warning(f"⚠️ **Moderate overall comfort** (Average: {avg_comfort:.2f}/4)")
+                                else:
+                                    st.error(f"❌ **Poor overall comfort** (Average: {avg_comfort:.2f}/4)")
+                            else:
+                                st.info("ℹ️ Overall Comfort data not available.")
+                        else:
+                            st.info("ℹ️ Overall Comfort data not available. Run new predictions to generate this metric.")
+                        
+                        # Comfort Classes Distribution Analysis
+                        st.markdown("---")
+                        st.markdown("### 🏷️ Comfort Classes Distribution")
+                        st.markdown("""
+                        **Understanding Comfort Classification:**
+                        - 🌡️ **Thermal**: Temperature and humidity comfort levels based on PMV/PPD predictions
+                        - 👁️ **Visual**: Lighting comfort considering luminance levels and visual satisfaction
+                        - 👂 **Acoustic**: Sound comfort based on noise levels and annoyance predictions  
+                        - 🫁 **Air Quality**: Indoor air quality considering CO₂, PM2.5, and TVOC levels
+                        - 🎯 **Overall**: Weighted combination of all comfort domains for holistic assessment
+                        """)
+                        
+                        # Overall Comfort Class (most prominent)
+                        if 'overall_comfort_class' in comfort_data.columns:
+                            st.markdown("#### 🎯 Overall Comfort Classification")
+                            st.markdown("*Comprehensive assessment combining all comfort domains*")
+                            _pie_chart(comfort_data_display, 'overall_comfort_class', 
+                                     title="Overall Comfort Distribution", context="energy_comfort_analysis")
+                            st.markdown("---")
+                        
+                        # Grid of individual comfort class pie charts
+                        comfort_class_cols = ['thermal_class', 'visual_class', 'acoustic_class', 'iaq_class']
+                        available_comfort_cols = [col for col in comfort_class_cols if col in comfort_data.columns]
+                        
+                        if available_comfort_cols:
+                            st.markdown("#### 🔍 Individual Comfort Domain Classifications")
+                            
+                            # Create grid layout for comfort class pie charts
+                            if len(available_comfort_cols) == 4:
+                                # 2x2 grid for all 4 domains
+                                col1, col2 = st.columns(2)
+                                col3, col4 = st.columns(2)
+                                grid_cols = [col1, col2, col3, col4]
+                            elif len(available_comfort_cols) == 3:
+                                # 3 columns for 3 domains
+                                col1, col2, col3 = st.columns(3)
+                                grid_cols = [col1, col2, col3]
+                            elif len(available_comfort_cols) == 2:
+                                # 2 columns for 2 domains  
+                                col1, col2 = st.columns(2)
+                                grid_cols = [col1, col2]
+                            else:
+                                # Single column for 1 domain
+                                grid_cols = [st.container()]
+                            
+                            # Display comfort class pie charts in grid
+                            for idx, class_col in enumerate(available_comfort_cols):
+                                with grid_cols[idx]:
+                                    # Add domain-specific context and icons
+                                    if 'thermal' in class_col:
+                                        st.markdown("**🌡️ Thermal Comfort**")
+                                        st.caption("Temperature & humidity comfort levels")
+                                    elif 'visual' in class_col:
+                                        st.markdown("**👁️ Visual Comfort**") 
+                                        st.caption("Lighting & luminance satisfaction")
+                                    elif 'acoustic' in class_col:
+                                        st.markdown("**👂 Acoustic Comfort*")
+                                        st.caption("Noise levels & sound annoyance")
+                                    elif 'iaq' in class_col:
+                                        st.markdown("**🫁 Air Quality**")
+                                        st.caption("CO₂, PM2.5, TVOC levels")
+                                    
+                                    # Create pie chart for this comfort domain
+                                    _pie_chart(
+                                        comfort_data_display, class_col,
+                                        title=class_col.replace('_', ' ').title().replace('Iaq', 'IAQ'),
+                                        context="energy_comfort_analysis"
+                                    )
+                            
             elif name == 'IAQ':
                 # --- pie-chart
                 iaq_fields = [
@@ -4668,7 +5192,8 @@ if st.session_state.get("predicted"):
                         # render the pie for this IAQ metric inside that placeholder
                         with target:
                             _pie_chart(df_pred, class_col, title=DISPLAY.get(class_col, class_col), context="iaq")
-                    st.markdown("-- IAQ Report --" + DUMMY_TEXT)
+                    # Generate IAQ report
+                    _generate_iaq_report(df_pred)
             else:
                 # single pie for Thermal / Visual / Acoustic
                 pie_cols = st.columns([1, 3], gap="small")
@@ -4677,8 +5202,16 @@ if st.session_state.get("predicted"):
                     with pie_cols[0]:
                         _pie_chart(df_pred, class_col, title=f"{name} class", context=name.lower())
                     with pie_cols[1]:
-                        st.markdown(f"-- {name} Report --" + "\n" + DUMMY_TEXT)
-                    logger.info("Rendered %s pie for column %s", name, class_col)
+                        # Generate domain-specific reports
+                        if name == "Thermal":
+                            _generate_thermal_report(df_pred)
+                        elif name == "Visual":
+                            _generate_visual_report(df_pred)
+                        elif name == "Acoustic":
+                            _generate_acoustic_report(df_pred)
+                        else:
+                            st.markdown(f"-- {name} Report --")
+                    logger.debug("Rendered %s pie for column %s", name, class_col)
                 else:
                     logger.warning("No class column %s – pie skipped", class_col)
             
@@ -4721,4 +5254,9 @@ if st.session_state.get("predicted"):
                 
 else:
     st.title("Energy Comfortness Tool ")
-    st.info("Run predictions to see results.")
+    if _is_system_configured():
+        st.info("🔍 Use the sidebar to select spaces and set parameters, then click 'Predict' to generate comfort analysis.")
+    else:
+        st.info("🚀 Get started by uploading data using the 'Configure' button in the sidebar.")
+
+
