@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 """Streamlit dashboard for the Energy Comfortness Tool (ECT)."""
 
 from __future__ import annotations
 
 # versioning
-_VERSION = "0.0.10"
-_VERDATE = "15 Sep 2025"
+_VERSION = "0.0.12"
+_VERDATE = "01 Oct 2025"
 
 import os, sys, math, logging, importlib.util, shutil
 from pathlib import Path
@@ -1749,11 +1748,11 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
     with col3:
         st.metric("❄️ Cooling Share", f"{(total_cooling/total_energy*100):.1f}%" if total_energy > 0 else "0%")
     
-    # Zone Energy Contribution Pie Chart (only show for building-wide view)
+    # Zone Energy Contribution Stacked Bar Chart (only show for building-wide view)
     if 'zone_energy' in energy_data and energy_data['zone_energy'] and not is_space_specific:
-        st.markdown("### 🏠 Space Energy Contribution")
+        st.markdown("### 📊 Space Energy Contribution")
         
-        # Prepare data for pie chart
+        # Prepare data for stacked bar chart
         zone_energy = energy_data['zone_energy']
         space_names = energy_data.get('space_names', {})
         
@@ -1768,10 +1767,10 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                 zone_id_upper = zone_id.upper()
                 if zone_id_upper in space_names:
                     zone_name = space_names[zone_id_upper]
-                    logger.debug(f"Pie chart: Zone {zone_id} -> Space '{zone_name}' ({total_zone:.1f} kWh)")
+                    logger.debug(f"Bar chart: Zone {zone_id} -> Space '{zone_name}' ({total_zone:.1f} kWh)")
                 else:
                     zone_name = zone_id
-                    logger.debug(f"Pie chart: Zone {zone_id} (no space name) -> {total_zone:.1f} kWh")
+                    logger.debug(f"Bar chart: Zone {zone_id} (no space name) -> {total_zone:.1f} kWh")
                 
                 pie_data.append({
                     'Space': zone_name,
@@ -1783,23 +1782,39 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
         
         if pie_data:
             pie_df = pd.DataFrame(pie_data)
-            logger.debug(f"Creating pie chart with {len(pie_df)} spaces, total: {pie_df['Energy_kWh'].sum():.1f} kWh")
+            logger.debug(f"Creating stacked bar chart with {len(pie_df)} spaces, total: {pie_df['Energy_kWh'].sum():.1f} kWh")
             
-            # Create two columns for pie chart and data table
-            pie_col1, pie_col2 = st.columns([2, 1])
+            # Create two columns for stacked bar chart and data table
+            chart_col1, chart_col2 = st.columns([2, 1])
             
-            with pie_col1:
-                # Create pie chart using Altair
-                pie_chart = alt.Chart(pie_df).mark_arc(
-                    innerRadius=50,
-                    outerRadius=120,
-                    stroke='white',
-                    strokeWidth=2
+            with chart_col1:
+                # Create horizontal stacked bar chart for space energy distribution
+                # Sort spaces by energy consumption and take top 8 for clarity
+                pie_df_sorted = pie_df.sort_values('Energy_kWh', ascending=False).head(8)
+                
+                # Calculate cumulative percentages for stacking
+                pie_df_sorted = pie_df_sorted.copy()
+                pie_df_sorted['cumulative_start'] = pie_df_sorted['Percentage'].cumsum() - pie_df_sorted['Percentage']
+                pie_df_sorted['cumulative_end'] = pie_df_sorted['Percentage'].cumsum()
+                pie_df_sorted['Category'] = "Energy by Space"
+                
+                # Create horizontal stacked bar chart
+                space_bar_chart = alt.Chart(pie_df_sorted, height=100, width=500).mark_bar(
+                    height=60
                 ).encode(
-                    theta=alt.Theta('Energy_kWh:Q', scale=alt.Scale(type='linear')),
+                    x=alt.X('cumulative_start:Q', title="", scale=alt.Scale(domain=[0, 100])),
+                    x2=alt.X2('cumulative_end:Q'),
+                    y=alt.Y('Category:N', title="", axis=alt.Axis(labels=False, ticks=False)),
                     color=alt.Color('Space:N', 
                                     scale=alt.Scale(scheme='category20'),
-                                    legend=alt.Legend(title="Spaces", orient="right", labelLimit=150)),
+                                    legend=alt.Legend(
+                                        title="Spaces", 
+                                        orient="bottom", 
+                                        columns=4,
+                                        labelLimit=120,
+                                        labelFontSize=10,
+                                        titleFontSize=11
+                                    )),
                     tooltip=[
                         alt.Tooltip('Space:N', title='Space Name'),
                         alt.Tooltip('Energy_kWh:Q', title='Total Energy (kWh)', format='.1f'),
@@ -1808,14 +1823,12 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                         alt.Tooltip('Percentage:Q', title='Share (%)', format='.1f')
                     ]
                 ).properties(
-                    width=350,
-                    height=350,
                     title=f"Energy Consumption by Space{' (Filtered Period)' if start_dt and end_dt else ''}"
                 )
                 
-                st.altair_chart(pie_chart, use_container_width=True)
+                st.altair_chart(space_bar_chart, use_container_width=True)
             
-            with pie_col2:
+            with chart_col2:
                 st.markdown("**📊 Space Breakdown:**")
                 # Sort by energy consumption for better display
                 pie_df_sorted = pie_df.sort_values('Energy_kWh', ascending=False)
@@ -1835,7 +1848,7 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                         delta=f"{remaining_energy/total_energy*100:.1f}% of total"
                     )
         else:
-            st.info("ℹ️ No zone energy data available for pie chart")
+            st.info("ℹ️ No zone energy data available for stacked bar chart")
     
     # Zone-level data if available
     if 'zone_energy' in energy_data:
@@ -2084,8 +2097,9 @@ from ece.utils.logging import get_logger
 logger = get_logger(__name__)
 
 # --------------------- FILE LOCATIONS -------------------------
-LOGO = Path("./dashboard/assets/images/logo.png")
-ECT_LOGO = Path("./dashboard/assets/images/ect_logo.png")
+LOGO      = Path("./dashboard/assets/images/logo.png")
+ECT_LOGO  = Path("./dashboard/assets/images/ect_logo.png")
+UNIS_LOGO = Path("./dashboard/assets/images/unis_logo.png")
 FAVICON = Path("./dashboard/assets/images/favicon.ico")
 PROFILES  = Path("./dashboard/assets/config/occupant_profiles.csv")
 
@@ -2882,16 +2896,64 @@ if 'performance_optimizations_applied' not in st.session_state:
     st.session_state['performance_optimizations_applied'] = True
     logger.info("Applied Streamlit performance optimizations for large datasets")
 
+# *** UI FIX: Hide cursor, image expand buttons, and focus outlines ***
+st.markdown("""
+<style>
+/* Hide caret everywhere except actual text inputs */
+.stApp *:not(input):not(textarea):not([contenteditable="true"]) {
+  caret-color: transparent !important;
+}
+/* Remove focus ring on non-inputs */
+.stApp *:not(input):not(textarea):focus {
+  outline: none !important;
+}
+/* (Optional) stop text selection in empty areas */
+.stApp, .stSidebar {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Remove the fullscreen/expand button on images */
+[data-testid="stImage"] button,
+button[title="View fullscreen"] {
+  display: none !important;
+}
+            
+/* Hide top-right Deploy + 3-dot menu */
+header [data-testid="stToolbar"],
+header [data-testid="stStatusWidget"],
+header div[role="button"] {
+  display: none !important;
+}
+
+/* 5) Hide Streamlit footer ("Made with Streamlit") */
+footer {visibility: hidden;}
+[data-testid="stFooter"] {
+  display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ECT Logo at top of sidebar - centered
 if ECT_LOGO.exists() and LOGO.exists():
-    col1, col2, col3 = st.sidebar.columns([1, 2, 1], vertical_alignment="center", )
-    with col2:
-        # Create two sub-columns for the logos within the centered column
-        logo_col1, logo_col2 = st.columns(2, vertical_alignment="center")
-        with logo_col1:
-            st.image(str(ECT_LOGO), width=400)
-        with logo_col2:
-            st.image(str(LOGO), width=400)
+    import base64
+    
+    # Convert images to base64 for HTML embedding
+    with open(ECT_LOGO, "rb") as f:
+        ect_logo_b64 = base64.b64encode(f.read()).decode()
+    with open(LOGO, "rb") as f:
+        logo_b64 = base64.b64encode(f.read()).decode()
+    
+    st.sidebar.markdown(
+        f"""
+        <div style="display: flex; justify-content: center; align-items: center; gap: 10px;">
+            <img src="data:image/png;base64,{ect_logo_b64}" width="80">
+            <img src="data:image/png;base64,{logo_b64}" width="80">
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 
 
 # Initialize button - Create popup for data upload
@@ -2965,13 +3027,37 @@ end_dt = pd.to_datetime(end)
 st.session_state['start_dt'] = start_dt
 st.session_state['end_dt'] = end_dt
 
-# # Inference data - DEPRECATED
-# infer_csv = st.sidebar.file_uploader("Inference CSV", type="csv")
-# if infer_csv and st.sidebar.button("Insert inference rows"):
-#     _insert_csv(infer_csv, "inference")
-#     st.cache_data.clear()
-
+# Profile details in an expander
+profiles = pd.read_csv(PROFILES)
+with st.sidebar.expander("👤 Profile Details", expanded=False):
+    prof_id = st.selectbox("Occupant profile", profiles["occupant_profile_id"])
+    prof    = profiles.set_index("occupant_profile_id").loc[prof_id]
     
+    # Store selected profile in session state
+    st.session_state["occupant_profile"] = prof_id
+
+    A_m2   = get_human_surf_area(prof["weight_kg"], prof["height_cm"])
+    BMR_W  = basal_metabolic_rate(prof)
+    BMR_kcal = BMR_W / 0.048425
+    M_Wm2  = metabolic_rate_fanger(BMR_W, A_m2)
+    M_met  = wm2_to_met(M_Wm2)
+    if prof['visual_impairment']:
+        vis_imp = "Yes"
+    else:
+        vis_imp = "No"
+    st.markdown(
+        f"""**Profile details**  
+        - Age: **{prof['age']}**  
+        - Gender: {prof['gender']}  
+        - Weight: **{prof['weight_kg']} kg**  
+        - Height: **{prof['height_cm']} cm**  
+        - *BMR*: **{BMR_kcal:.0f} kcal/day**  
+        - *M*: **{M_Wm2:.1f} W m⁻²**  ≈  **{M_met:.2f} met**  
+        - *Visual Impairment*: **{vis_imp}**
+        """
+    )
+
+
 # Building and space selection
 building_options = _get_building_ids()
 if building_options:
@@ -2995,36 +3081,7 @@ else:
 # Keep legacy variable name for compatibility
 selected_sensor = selected_space
 
-# occupant profile ----------------------------------------------------------
-
-
-# Profile details in an expander
-profiles = pd.read_csv(PROFILES)
-with st.sidebar.expander("👤 Profile Details", expanded=False):
-    prof_id = st.selectbox("Occupant profile", profiles["occupant_profile_id"])
-    prof    = profiles.set_index("occupant_profile_id").loc[prof_id]
-    
-    # Store selected profile in session state
-    st.session_state["occupant_profile"] = prof_id
-
-    A_m2   = get_human_surf_area(prof["weight_kg"], prof["height_cm"])
-    BMR_W  = basal_metabolic_rate(prof)
-    BMR_kcal = BMR_W / 0.048425
-    M_Wm2  = metabolic_rate_fanger(BMR_W, A_m2)
-    M_met  = wm2_to_met(M_Wm2)
-    st.markdown(
-        f"""**Profile details**  
-- Age: **{prof['age']}**  
-- Gender: {prof['gender']}  
-- Weight: **{prof['weight_kg']} kg**  
-- Height: **{prof['height_cm']} cm**  
-- *BMR*: **{BMR_kcal:.0f} kcal/day**  
-- *M*: **{M_Wm2:.1f} W m⁻²**  ≈  **{M_met:.2f} met**  
-- *Visual Impairment*: **{prof['visual_impairment']}**"""
-    )
-
-# st.sidebar.markdown("---")
-
+# Train models button
 if "training" not in st.session_state:
     st.session_state["training"] = False
 if "predicted" not in st.session_state:
@@ -3033,10 +3090,13 @@ if "predicted" not in st.session_state:
 
 def _train():
     st.session_state["training"] = True
-    with st.spinner("Training models …"):
+    try:
         main_train_all_targets()
-    st.session_state["training"] = False
-    st.sidebar.success("🎉 Model training complete! Ready for simulation.")
+        st.session_state["training"] = False
+        st.session_state["training_success"] = True
+    except Exception as e:
+        st.session_state["training"] = False
+        st.session_state["training_error"] = str(e)
 
 
 def _calculate_comfort_on_the_fly(comfort_data: pd.DataFrame, selected_profile: str, age: int = None) -> pd.DataFrame:
@@ -3277,11 +3337,24 @@ def _predict():
             if not isinstance(end_dt, datetime):
                 end_dt = pd.to_datetime(end_dt)
             
-            # First check if we have trained models
-            models_dir = Path("../models")
-            if not models_dir.exists():
-                st.sidebar.error("❌ No models directory found. Please train models first.")
-                logger.exception("Models directory does not exist")
+            # First check if we have trained models - try multiple possible locations
+            possible_models_dirs = [
+                Path("./models"),           # Same level as dashboard
+                Path("../models"),          # One level up from dashboard  
+                Path("dashboard/models"),   # Relative from project root
+                Path("./dashboard/models")  # From current working directory
+            ]
+            
+            models_dir = None
+            for potential_dir in possible_models_dirs:
+                if potential_dir.exists():
+                    models_dir = potential_dir
+                    logger.info(f"Found models directory at: {models_dir}")
+                    break
+            
+            if models_dir is None:
+                st.session_state["model_error"] = "no_models_dir"
+                logger.exception(f"Models directory does not exist. Checked locations: {[str(p) for p in possible_models_dirs]}")
                 return
             
             with SessionLocal() as ses:
@@ -3292,7 +3365,7 @@ def _predict():
                 # Check for trained models
                 trained_models = ses.query(TrainedModel).all()
                 if not trained_models:
-                    st.sidebar.error("❌ No trained models found. Please train models first.")
+                    st.session_state["model_error"] = "no_trained_models"
                     logger.exception("No trained models in database")
                     return
                 
@@ -3517,8 +3590,8 @@ def _add_derived_features_for_prediction(df: pd.DataFrame, feats: list) -> pd.Da
 
 # Train and Simulate buttons
 col1, col2 = st.sidebar.columns(2)
-col1.button("🚀 Train models", on_click=_train, disabled=st.session_state["training"])
-col2.button("🔮 Simulate", on_click=_predict)
+col1.button("Train models", on_click=_train, disabled=st.session_state["training"])
+col2.button("Simulate", on_click=_predict)
 
 # DEBUG: Add test button to check database state
 def _test_database_state():
@@ -3585,7 +3658,23 @@ if st.session_state.get('reset_confirmation', False):
         if confirm_col2.button("❌ Cancel"):
             st.session_state.reset_confirmation = False
             st.rerun()
-
+# add UniSystems logo
+if UNIS_LOGO.exists():
+    import base64
+    
+    # Convert images to base64 for HTML embedding
+    with open(UNIS_LOGO, "rb") as f:
+        unis_logo_b64 = base64.b64encode(f.read()).decode()
+    
+    st.sidebar.markdown(
+        f"""
+        <div style="display: flex; justify-content: center; align-items: center; gap: 10px;">
+            <img src="data:image/png;base64,{unis_logo_b64}" width="100">
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+            
 # ---------------------------------------------------------------------------
 # Display name helpers
 # ---------------------------------------------------------------------------
@@ -3784,7 +3873,7 @@ def _add_comfort_cols(df: pd.DataFrame, profile) -> pd.DataFrame:
 # Line chart for time-series
 # ---------------------------------------------------------------------------
 def _line_chart(df: pd.DataFrame, obs: str | None, pred: str):
-    """Draw line+marker chart and add a per-chart CSV export button."""
+    """Draw line+marker chart for time-series data."""
     # assemble columns
     cols = ["time_end", pred] + ([obs] if obs else [])
     tmp = (_decimate(df[cols])
@@ -3813,17 +3902,6 @@ def _line_chart(df: pd.DataFrame, obs: str | None, pred: str):
         .interactive()
     )
     st.altair_chart(line, use_container_width=True)
-
-    # ----- per-chart CSV export -----
-    csv_bytes = tmp.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Export CSV",
-        data=csv_bytes,
-        file_name=f"{pred}_{datetime.now(tz=timezone.utc):%Y%m%dT%H%M%S}.csv",  # Fix here
-        mime="text/csv",
-        type="secondary",
-        key=f"csv_{pred}_{obs}",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -3869,18 +3947,6 @@ def _class_timeseries(df: pd.DataFrame, cols: list[str], *, title: str):
     logger.debug(f"Displaying timeseries chart for {title}...")
     st.altair_chart(chart, use_container_width=True)
     logger.debug(f"Timeseries chart displayed successfully for {title}")
-
-    logger.debug(f"Creating CSV export for {title}...")
-    # download button -------------------------------------------------
-    csv_bytes = tmp.to_csv(index=False).encode()
-    st.download_button(
-        f"Export {title} classes CSV",
-        csv_bytes,
-        file_name=f"{title.replace(' ', '_').lower()}_classes_{datetime.now(tz=timezone.utc):%Y%m%dT%H%M%S}.csv",  # Fix here
-        mime="text/csv",
-        type="secondary",
-        key=f"csv_classes_{title}"
-    )
 
 def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "default") -> None:
     """Draw a pie chart of comfort-class distribution."""
@@ -3931,12 +3997,10 @@ def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "
                     ),
                 legend=alt.Legend(
                     title     = title,
-                    # orient    = "top-left",    # manual placement!
-                    #    legendX   = 160,       # px from left of the chart
-                    #    legendY   = 10,        # px from top
-                    #    padding   = 0,         # no extra gap
-                    #    labelPadding = 2,
-                    #    labelLimit   = 80,
+                    orient    = "bottom",      # Position legend below the chart
+                    columns   = 1,             # Use single column layout
+                    titleAnchor = "start",     # Align title to the left
+                    labelLimit = 200,          # Allow longer labels
                          ),
                ),
                tooltip=[
@@ -3948,19 +4012,105 @@ def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "
     logger.debug(f"Displaying Altair chart for {class_col}...")
     st.altair_chart(chart, use_container_width=True)
     logger.debug(f"Chart displayed successfully for {class_col}")
+
+def _stacked_bar_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "default") -> None:
+    """Draw a horizontal stacked bar chart of comfort-class distribution."""
+    logger.debug(f"Starting stacked bar chart generation for {class_col} with {len(df)} records")
     
-    # ----- per-chart CSV export -----
-    logger.debug(f"Creating CSV export button for {class_col}...")
-    csv_bytes = counts.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Export CSV",
-        data=csv_bytes,
-        file_name=f"{class_col}_{datetime.now(tz=timezone.utc):%Y%m%dT%H%M%S}.csv",  # Fix here
-        mime="text/csv",
-        type="secondary",
-        key=f"csv_{context}_{class_col}",
+    if class_col not in df.columns:
+        logger.warning(f"Column {class_col} not found in dataframe. Available columns: {list(df.columns)}")
+        st.info(f"No {title.lower()} data")
+        return
+
+    logger.debug(f"Calculating value counts for {class_col}...")
+    # --- counts -----------------------------------------------------------
+    counts = (df[class_col]
+              .dropna()
+              .value_counts()
+               .reindex(["A","B","C","D","NC"], fill_value=0)
+              .reset_index()
+              .rename(columns={class_col: "Class"}))
+    
+    # Filter out classes with zero counts for better visualization
+    counts = counts[counts["count"] > 0]
+    counts["Share"] = counts["count"] / counts["count"].sum()
+    logger.debug(f"Value counts calculated: {len(counts)} classes")
+
+    logger.debug(f"Building legend labels for {class_col}...")
+    # --- build legend labels "A (limits)" ---------------------------------
+    limits = _LIMITS.get(class_col, {})
+    counts["Label"] = counts["Class"].apply(
+        lambda c: f"{c} ({limits.get(c,'')})" if c in limits else c
     )
-    logger.debug(f"Pie chart generation completed for {class_col}")
+
+    logger.debug(f"Creating Altair stacked bar chart for {class_col}...")
+    
+    # Add a dummy category for the stacked bar
+    counts["Category"] = title
+    
+    # Create cumulative positions for stacking
+    counts = counts.sort_values("Class")  # Ensure consistent ordering
+    counts["cumulative_start"] = counts["Share"].cumsum() - counts["Share"]
+    counts["cumulative_end"] = counts["Share"].cumsum()
+    
+    # stable ordering A,B,C,D,NC → keeps colours fixed
+    order = list(_LIMITS[class_col].keys())
+    available_classes = counts["Class"].tolist()
+    order = [c for c in order if c in available_classes]  # Filter to available classes
+    palette = _COLOURS[:len(order)]
+
+    chart = (
+        alt.Chart(counts, height=80, width=600)
+        .mark_bar(height=40)
+        .encode(
+            x=alt.X("cumulative_start:Q", title="", scale=alt.Scale(domain=[0, 1])),
+            x2=alt.X2("cumulative_end:Q"),
+            y=alt.Y("Category:N", title="", axis=alt.Axis(labels=False, ticks=False)),
+            color=alt.Color(
+                "Label:N",
+                sort=[f"{c} ({limits.get(c,'')})" for c in order],
+                scale=alt.Scale(
+                    domain=[f"{c} ({limits.get(c,'')})" for c in order],
+                    range=[_COLOURS[order.index(c)] for c in order],
+                ),
+                legend=alt.Legend(
+                    title=title,
+                    orient="bottom",
+                    columns=min(len(order), 5),  # Limit columns for better layout
+                    labelFontSize=11,
+                    titleFontSize=12
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("Label:N", title="Class"),
+                alt.Tooltip("count:Q", title="Count"),
+                alt.Tooltip("Share:Q", format=".1%", title="Percentage")
+            ],
+        )
+        .resolve_scale(color='independent')
+    )
+    
+    logger.debug(f"Displaying Altair stacked bar chart for {class_col}...")
+    st.altair_chart(chart, use_container_width=True)
+    
+    # Show summary statistics below the chart
+    col1, col2, col3 = st.columns(3)
+    total_records = counts["count"].sum()
+    with col1:
+        st.metric("Total Records", f"{total_records:,}")
+    if len(counts) > 0:
+        with col2:
+            best_class = counts.loc[counts["count"].idxmax()]
+            st.metric("Most Common", f"{best_class['Class']} ({best_class['Share']:.1%})")
+        with col3:
+            if "A" in available_classes:
+                class_a_share = counts[counts["Class"] == "A"]["Share"].iloc[0]
+                st.metric("Class A (Best)", f"{class_a_share:.1%}")
+            else:
+                st.metric("Class A (Best)", "0%")
+    
+    logger.debug(f"Chart displayed successfully for {class_col}")
+    logger.debug(f"Stacked bar chart generation completed for {class_col}")
 
 
 def _generate_iaq_report(df: pd.DataFrame):
@@ -4017,8 +4167,8 @@ def _generate_iaq_report(df: pd.DataFrame):
                     worst_compliance = compliance_pct
                     worst_param = param_name
                 
-                # Poor performance analysis
-                poor_classes = class_counts.get('C', 0) + class_counts.get('D', 0)
+                # Poor performance analysis (including NC as non-compliant)
+                poor_classes = class_counts.get('C', 0) + class_counts.get('D', 0) + class_counts.get('NC', 0)
                 poor_pct = (poor_classes / total_valid) * 100
                 
                 with st.expander(f"🔍 {param_name} Analysis"):
@@ -4070,7 +4220,7 @@ def _generate_thermal_report(df: pd.DataFrame):
     
     compliant = class_counts.get('A', 0) + class_counts.get('B', 0)
     compliance_pct = (compliant / total_valid) * 100
-    poor_pct = (class_counts.get('C', 0) + class_counts.get('D', 0)) / total_valid * 100
+    poor_pct = (class_counts.get('C', 0) + class_counts.get('D', 0) + class_counts.get('NC', 0)) / total_valid * 100
     
     st.markdown("### 📈 Thermal Performance Report")
     st.write(f"**Compliance Rate:** {compliance_pct:.1f}% of conditions met acceptable thermal comfort standards (Classes A-B)")
@@ -4104,7 +4254,7 @@ def _generate_visual_report(df: pd.DataFrame):
     
     compliant = class_counts.get('A', 0) + class_counts.get('B', 0)
     compliance_pct = (compliant / total_valid) * 100
-    poor_pct = class_counts.get('C', 0) / total_valid * 100
+    poor_pct = (class_counts.get('C', 0) + class_counts.get('D', 0) + class_counts.get('NC', 0)) / total_valid * 100
     
     st.markdown("### 📈 Visual Performance Report")
     st.write(f"**Compliance Rate:** {compliance_pct:.1f}% of conditions provided adequate lighting (Classes A-B)")
@@ -4136,7 +4286,7 @@ def _generate_acoustic_report(df: pd.DataFrame):
     
     compliant = class_counts.get('A', 0) + class_counts.get('B', 0) + class_counts.get('C', 0)
     compliance_pct = (compliant / total_valid) * 100
-    poor_pct = class_counts.get('D', 0) / total_valid * 100
+    poor_pct = (class_counts.get('D', 0) + class_counts.get('NC', 0)) / total_valid * 100
     
     st.markdown("### 📈 Acoustic Performance Report")
     st.write(f"**Compliance Rate:** {compliance_pct:.1f}% of conditions maintained acceptable noise levels (Classes A-C: <65 dB)")
@@ -4191,8 +4341,8 @@ def _generate_overall_comfort_report(df: pd.DataFrame):
                 # Class A is excellent
                 excellent_pct = (class_counts.get('A', 0) / total_valid) * 100
                 
-                # Classes C and D are poor
-                poor_classes = class_counts.get('C', 0) + class_counts.get('D', 0)
+                # Classes C, D, and NC are poor (non-compliant)
+                poor_classes = class_counts.get('C', 0) + class_counts.get('D', 0) + class_counts.get('NC', 0)
                 poor_pct = (poor_classes / total_valid) * 100
                 
                 domain_performance[domain_name] = {
@@ -4435,7 +4585,7 @@ if st.session_state.get("predicted"):
     domain_map = {
         "Thermal": ["temperature_c", "rh_percent", "PMV_pred", "PPD_pred"],
         "Visual": ["luminance_lux", "vis_score_pred"],
-        "Acoustic": ["average_noise_db", "peak_db", "annoy_pred"],
+        "Acoustic": ["average_noise_db", "peak_db"],  # "annoy_pred" commented out until calculation is fixed
         "IAQ": ["co2_ppm", "pm2_5_ugm3", "tvoc_ppb"],
         "Energy": [],  # Will be handled separately
         "Energy Comfortness": [],  # Will be handled separately
@@ -4841,30 +4991,43 @@ if st.session_state.get("predicted"):
                             heating_ratio = (total_heating / total_energy * 100) if total_energy > 0 else 0
                             st.metric("Heating Share", f"{heating_ratio:.1f}%")
                         
-                        # ==== PIE CHART AND PEAK POWER ====
-                        pie_col, peak_col = st.columns([2, 1])
+                        # ==== STACKED BAR CHART AND PEAK POWER ====
+                        chart_col, peak_col = st.columns([2, 1])
                         
-                        with pie_col:
+                        with chart_col:
                             if total_energy > 0:
-                                # Create pie chart data
-                                pie_data = pd.DataFrame({
+                                # Create stacked bar chart data
+                                bar_data = pd.DataFrame({
                                     'Energy Type': ['Heating', 'Cooling'],
                                     'Energy (kWh)': [total_heating, total_cooling],
                                     'Percentage': [heating_ratio, 100 - heating_ratio]
                                 })
                                 
-                                # Create pie chart
-                                pie_chart = alt.Chart(pie_data).mark_arc(
-                                    innerRadius=60,
-                                    outerRadius=120,
-                                    strokeWidth=2,
-                                    stroke='white'
+                                # Filter out zero values for cleaner visualization
+                                bar_data = bar_data[bar_data['Energy (kWh)'] > 0]
+                                
+                                # Create cumulative positions for stacking
+                                bar_data["cumulative_start"] = bar_data["Percentage"].cumsum() - bar_data["Percentage"]
+                                bar_data["cumulative_end"] = bar_data["Percentage"].cumsum()
+                                bar_data["Category"] = "Energy Distribution"
+                                
+                                # Create horizontal stacked bar chart
+                                energy_bar_chart = alt.Chart(bar_data, height=60, width=400).mark_bar(
+                                    height=30
                                 ).encode(
-                                    theta=alt.Theta('Energy (kWh):Q'),
+                                    x=alt.X('cumulative_start:Q', title="", scale=alt.Scale(domain=[0, 100])),
+                                    x2=alt.X2('cumulative_end:Q'),
+                                    y=alt.Y('Category:N', title="", axis=alt.Axis(labels=False, ticks=False)),
                                     color=alt.Color(
                                         'Energy Type:N',
                                         scale=alt.Scale(domain=['Heating', 'Cooling'], range=['#ff4444', '#4488ff']),
-                                        legend=alt.Legend(title="Energy Type", orient="right")
+                                        legend=alt.Legend(
+                                            title="Energy Type", 
+                                            orient="bottom",
+                                            columns=2,
+                                            labelFontSize=11,
+                                            titleFontSize=12
+                                        )
                                     ),
                                     tooltip=[
                                         alt.Tooltip('Energy Type:N', title='Type'),
@@ -4875,9 +5038,17 @@ if st.session_state.get("predicted"):
                                     title='Heating vs Cooling Energy Distribution'
                                 )
                                 
-                                st.altair_chart(pie_chart, use_container_width=True)
+                                st.altair_chart(energy_bar_chart, use_container_width=True)
+                                
+                                # Show energy breakdown as metrics
+                                energy_col1, energy_col2 = st.columns(2)
+                                with energy_col1:
+                                    st.metric("🔥 Heating", f"{total_heating:,.1f} kWh", f"{heating_ratio:.1f}%")
+                                with energy_col2:
+                                    cooling_ratio = 100 - heating_ratio
+                                    st.metric("❄️ Cooling", f"{total_cooling:,.1f} kWh", f"{cooling_ratio:.1f}%")
                             else:
-                                st.info("No energy data available for pie chart")
+                                st.info("No energy data available for energy distribution chart")
                         
                         with peak_col:
                             st.markdown("**Peak Power**")
@@ -5064,9 +5235,9 @@ if st.session_state.get("predicted"):
                             comfort_score = comfort_data['vis_score_pred'].mean() if 'vis_score_pred' in comfort_data.columns else 0
                             st.metric("Visual Comfort", f"{comfort_score:.2f}")
                         
-                        with col5:
-                            annoyance_level = comfort_data['annoy_pred'].mean() if 'annoy_pred' in comfort_data.columns else 0
-                            st.metric("Acoustic Annoyance", f"{annoyance_level:.2f}")
+                        # with col5:
+                        #     annoyance_level = comfort_data['annoy_pred'].mean() if 'annoy_pred' in comfort_data.columns else 0
+                        #     st.metric("Acoustic Annoyance", f"{annoyance_level:.2f}")
                         
                         # Overall Comfort Analysis
                         if 'overall_comfort' in comfort_data.columns and comfort_data['overall_comfort'].notna().any():
@@ -5079,7 +5250,7 @@ if st.session_state.get("predicted"):
                             if len(chart_data) > 0:
                                 overall_chart = alt.Chart(chart_data).mark_line(
                                     point=True, strokeWidth=2
-                                ).add_selection(
+                                ).add_params(
                                     alt.selection_interval(bind='scales')
                                 ).encode(
                                     x=alt.X('time_end:T', title='Time'),
@@ -5126,14 +5297,14 @@ if st.session_state.get("predicted"):
                                      title="Overall Comfort Distribution", context="energy_comfort_analysis")
                             st.markdown("---")
                         
-                        # Grid of individual comfort class pie charts
+                        # Grid of individual comfort class stacked bar charts
                         comfort_class_cols = ['thermal_class', 'visual_class', 'acoustic_class', 'iaq_class']
                         available_comfort_cols = [col for col in comfort_class_cols if col in comfort_data.columns]
                         
                         if available_comfort_cols:
                             st.markdown("#### 🔍 Individual Comfort Domain Classifications")
                             
-                            # Create grid layout for comfort class pie charts
+                            # Create grid layout for comfort class stacked bar charts
                             if len(available_comfort_cols) == 4:
                                 # 2x2 grid for all 4 domains
                                 col1, col2 = st.columns(2)
@@ -5151,7 +5322,7 @@ if st.session_state.get("predicted"):
                                 # Single column for 1 domain
                                 grid_cols = [st.container()]
                             
-                            # Display comfort class pie charts in grid
+                            # Display comfort class stacked bar charts in grid
                             for idx, class_col in enumerate(available_comfort_cols):
                                 with grid_cols[idx]:
                                     # Add domain-specific context and icons
@@ -5176,7 +5347,7 @@ if st.session_state.get("predicted"):
                                     )
                             
             elif name == 'IAQ':
-                # --- pie-chart
+                # --- stacked-bar-chart
                 iaq_fields = [
                     "co2_ppm_class", "co_ppm_class", "tvoc_ppb_class",
                     "pm10_ugm3_class", "pm2_5_ugm3_class",
@@ -5189,7 +5360,7 @@ if st.session_state.get("predicted"):
                     for idx, class_col in enumerate(iaq_active):
                         target = pie_cols[idx]
 
-                        # render the pie for this IAQ metric inside that placeholder
+                        # render the pie chart for this IAQ metric inside that placeholder
                         with target:
                             _pie_chart(df_pred, class_col, title=DISPLAY.get(class_col, class_col), context="iaq")
                     # Generate IAQ report
@@ -5253,9 +5424,60 @@ if st.session_state.get("predicted"):
                             st.info(f"No prediction data for {DISPLAY.get(tgt, tgt)}")
                 
 else:
-    st.title("Energy Comfortness Tool ")
+    st.title("Energy Comfortness Tool")
     if _is_system_configured():
         st.info("🔍 Use the sidebar to select spaces and set parameters, then click 'Predict' to generate comfort analysis.")
+        
+        # Check for training in progress and display spinner beneath the header
+        if st.session_state.get("training", False):
+            st.info("🤖 **Training Machine Learning Models**")
+            with st.spinner("⏳ Training models in progress... This may take several minutes."):
+                # Keep the spinner active while training is happening
+                import time
+                time.sleep(0.1)  # Small delay to show spinner
+            st.stop()  # Prevent rest of UI from rendering during training
+        
+        # Check for training completion messages
+        if st.session_state.get("training_success", False):
+            st.success("🎉 **Model training completed successfully!** Ready for predictions.")
+            # Clear the success flag after displaying
+            del st.session_state["training_success"]
+            
+        if st.session_state.get("training_error"):
+            st.error(f"❌ **Model training failed:** {st.session_state['training_error']}")
+            st.info("Please check your data and try again. Ensure you have uploaded valid sensor data.")
+            # Clear the error flag after displaying
+            del st.session_state["training_error"]
+        
+        # Check for model-related errors and display them beneath the header
+        if st.session_state.get("model_error") == "no_models_dir":
+            st.error("🤖 **No Machine Learning Models Found**")
+            st.info("""
+            **To run predictions, you need to train ML models first:**
+            
+            1. 📊 **Upload sensor data** (CSV files with measurements)
+            2. 🎯 **Click "Train Models"** in the sidebar to create prediction models
+            3. ⏳ **Wait for training to complete** (this may take a few minutes)
+            4. 🔮 **Then return here to run predictions**
+            
+            💡 **Tip:** The models directory will be created automatically during training.
+            """)
+            # Clear the error after displaying
+            del st.session_state["model_error"]
+            
+        elif st.session_state.get("model_error") == "no_trained_models":
+            st.error("🎯 **No Trained Models in Database**")
+            st.info("""
+            **The models directory exists, but no trained models were found in the database.**
+            
+            **Please:**
+            1. 📊 **Ensure you have uploaded sensor data** (CSV files with measurements)
+            2. 🎯 **Click "Train Models"** in the sidebar to train prediction models
+            3. ✅ **Wait for training to complete successfully**
+            
+            """)
+            # Clear the error after displaying
+            del st.session_state["model_error"]
     else:
         st.info("🚀 Get started by uploading data using the 'Configure' button in the sidebar.")
 

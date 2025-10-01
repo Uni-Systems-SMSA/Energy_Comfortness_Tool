@@ -1,3 +1,9 @@
 occupant_profile_id,gender,age,weight_kg,height_cm,activity_level,clothing_insulation_clo,visual_impairment
-Profile1, male, 65, 76, 175, 1.2, 1.0,true
-Profile2, female, 62, 52, 158, 1.0, 1.0,false
+Adult (M),male,40,82,180,1.2,1,FALSE
+Adult (F),female,38,64,165,1.2,1,FALSE
+Elderly (M),male,72,74,172,1,1.2,FALSE
+Elderly (F),female,75,60,160,1,1.2,FALSE
+Wheelchair (M),male,55,70,168,1,1,FALSE
+Wheelchair (F),female,53,62,160,1,1,FALSE
+Low Vision (M),male,50,76,174,1.2,1,TRUE
+Low Vision (F),female,48,62,162,1.2,1,TRUE
