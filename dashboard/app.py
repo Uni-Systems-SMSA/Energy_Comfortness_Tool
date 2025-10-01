@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # versioning
-_VERSION = "0.0.12"
+_VERSION = "0.0.13"
 _VERDATE = "01 Oct 2025"
 
 import os, sys, math, logging, importlib.util, shutil
@@ -2100,6 +2100,7 @@ logger = get_logger(__name__)
 LOGO      = Path("./dashboard/assets/images/logo.png")
 ECT_LOGO  = Path("./dashboard/assets/images/ect_logo.png")
 UNIS_LOGO = Path("./dashboard/assets/images/unis_logo.png")
+EU_LOGO   = Path("./dashboard/assets/images/eu_logo.png")
 FAVICON = Path("./dashboard/assets/images/favicon.ico")
 PROFILES  = Path("./dashboard/assets/config/occupant_profiles.csv")
 
@@ -2917,6 +2918,7 @@ st.markdown("""
 [data-testid="stImage"] button,
 button[title="View fullscreen"] {
   display: none !important;
+  
 }
             
 /* Hide top-right Deploy + 3-dot menu */
@@ -2930,6 +2932,12 @@ header div[role="button"] {
 footer {visibility: hidden;}
 [data-testid="stFooter"] {
   display: none !important;
+}
+            
+/* 6) Hide sidebar's collapsible button
+/* Hide collapse/expand buttons in Streamlit 1.46.1 */
+[data-testid="stSidebarCollapseButton"] {
+    display: none !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -2947,8 +2955,10 @@ if ECT_LOGO.exists() and LOGO.exists():
     st.sidebar.markdown(
         f"""
         <div style="display: flex; justify-content: center; align-items: center; gap: 10px;">
-            <img src="data:image/png;base64,{ect_logo_b64}" width="80">
-            <img src="data:image/png;base64,{logo_b64}" width="80">
+            <img src="data:image/png;base64,{ect_logo_b64}" width="100">
+            <a href="https://www.euproject-access.eu/en" target="_blank">
+                <img src="data:image/png;base64,{logo_b64}" width="100">
+            </a>
         </div>
         """,
         unsafe_allow_html=True
@@ -3667,14 +3677,35 @@ if UNIS_LOGO.exists():
         unis_logo_b64 = base64.b64encode(f.read()).decode()
     
     st.sidebar.markdown(
+            f"""
+            <div style="display: flex; justify-content: center; align-items: center; gap: 10px;">
+                <a href="https://www.unisystems.com/" target="_blank">
+                    <img src="data:image/png;base64,{unis_logo_b64}" width="150">
+                </a>
+            </div>
+            """,
+        unsafe_allow_html=True
+    )
+
+# EU logo and funding info at bottom
+if EU_LOGO.exists():
+    # st.sidebar.markdown('---')
+    # Convert images to base64 for HTML embedding
+    with open(EU_LOGO, "rb") as f:
+        eu_logo = base64.b64encode(f.read()).decode()
+    # st.sidebar.markdown('---')
+    st.sidebar.markdown(
         f"""
-        <div style="display: flex; justify-content: center; align-items: center; gap: 10px;">
-            <img src="data:image/png;base64,{unis_logo_b64}" width="100">
+        <div style="display: flex; align-items: center; gap: 15px;">
+            <img src="data:image/png;base64,{eu_logo}" alt="EU Logo" width="50">
+            <span style="font-size:12px; text-align: justify;">
+                Funded by the EU (Grant No. 101147722)
+            </span>
         </div>
         """,
         unsafe_allow_html=True
     )
-            
+
 # ---------------------------------------------------------------------------
 # Display name helpers
 # ---------------------------------------------------------------------------
