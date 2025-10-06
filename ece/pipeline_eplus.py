@@ -25,7 +25,7 @@ def run_energy_simulation(
     weather_file_path: Path,
     sensor_id: str,
     project_base_dir: Optional[Path] = None,
-    ep_install_path: str = 'C://EnergyPlusV9-4-0/'
+    ep_install_path: str = '/usr/local/EnergyPlus-9-4-0'
 ) -> dict:
     """
     Run a building performance simulation with the EnergyPlus backend.
@@ -184,7 +184,7 @@ def run_example_simulation():
     )
     # Set the install path to your EnergyPlus installation according to your
     # system requirements
-    project.sim_settings.ep_install_path = 'C://EnergyPlusV9-4-0/'
+    project.sim_settings.ep_install_path = '/usr/local/EnergyPlus-9-4-0'
 
     # run annual simulation for EnergyPlus
     project.sim_settings.run_full_simulation = True
@@ -244,8 +244,8 @@ Examples:
     parser.add_argument(
         "--ep-path", 
         type=str, 
-        default="C://EnergyPlusV9-4-0/",
-        help="Path to EnergyPlus installation (default: C://EnergyPlusV9-4-0/)"
+        default="/usr/local/EnergyPlus-9-4-0",
+        help="Path to EnergyPlus installation (default: /usr/local/EnergyPlus-9-4-0)"
     )
     
     parser.add_argument(

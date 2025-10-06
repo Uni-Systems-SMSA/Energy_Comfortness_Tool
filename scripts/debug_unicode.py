@@ -17,7 +17,7 @@ def test_unicode_handling():
     ifc_path = r"C:\Software\github\energy_comfortness_tool\eplus_sim\models\CERTH Smart House - Living Room_20250804_125328.ifc"
     epw_path = r"C:\Software\github\energy_comfortness_tool\eplus_sim\weather\weather_CERTH Smart House - Living Room_2024_full_year.epw"
     sensor_id = "CERTH Smart House - Living Room"
-    ep_path = "C://EnergyPlusV9-4-0/"
+    ep_path = "/usr/local/EnergyPlus-9-4-0"
     project_dir = r"C:\Software\github\energy_comfortness_tool\eplus_sim"
     
     print(f"Testing file paths:")

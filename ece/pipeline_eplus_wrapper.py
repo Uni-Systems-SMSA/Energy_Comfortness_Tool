@@ -21,6 +21,39 @@ from ece.utils.logging import init_logger
 logger = init_logger(__name__)
 
 
+def _get_conda_executable() -> str:
+    """
+    Get the path to the conda executable.
+    
+    Returns
+    -------
+    str
+        Path to conda executable
+    """
+    # First check CONDA_EXE environment variable
+    conda_exe = os.environ.get('CONDA_EXE')
+    if conda_exe and Path(conda_exe).exists():
+        return conda_exe
+    
+    # Try to find conda in common locations
+    common_paths = [
+        '/home/ect/miniconda3/bin/conda',
+        os.path.expanduser('~/miniconda3/bin/conda'),
+        os.path.expanduser('~/anaconda3/bin/conda'),
+        '/opt/conda/bin/conda',
+        '/usr/local/bin/conda'
+    ]
+    
+    for conda_path in common_paths:
+        if Path(conda_path).exists():
+            logger.info(f"Found conda at: {conda_path}")
+            return conda_path
+    
+    # Fallback to 'conda' and let the system PATH resolve it
+    logger.warning("Could not find conda in common locations, using 'conda' from PATH")
+    return 'conda'
+
+
 def _sanitize_path_for_subprocess(path_str: str) -> str:
     """
     Sanitize file paths to avoid Unicode issues in subprocess calls.
@@ -49,7 +82,7 @@ def run_eplus_simulation_async(
     weather_file_path: Path,
     sensor_id: str,
     project_base_dir: Optional[Path] = None,
-    ep_install_path: str = 'C://EnergyPlusV9-4-0/',
+    ep_install_path: str = '/usr/local/EnergyPlus-9-4-0',
     conda_env_name: str = 'bim2sim'
 ) -> Dict[str, Any]:
     """
@@ -103,10 +136,14 @@ def run_eplus_simulation_async(
     pipeline_script = Path(__file__).parent / "pipeline_eplus.py"
     pipeline_script = pipeline_script.resolve()  # Get absolute path
     
+    # Get conda executable path
+    conda_exe = _get_conda_executable()
+    logger.info(f"Using conda executable: {conda_exe}")
+    
     # Build the conda run command with proper output capture
     # Ensure all paths are properly quoted and encoded
     cmd = [
-        "conda", "run", 
+        conda_exe, "run", 
         "-n", conda_env_name,
         "python", str(pipeline_script),
         "--ifc", ifc_path_sanitized,
@@ -231,6 +268,20 @@ def run_eplus_simulation_async(
             "message": "Simulation timed out"
         }
         
+    except FileNotFoundError as e:
+        error_msg = f"Failed to run simulation: {str(e)}"
+        if 'conda' in str(e).lower():
+            error_msg += f"\n\nConda executable not found. Tried: {cmd[0]}"
+            error_msg += "\nPlease ensure conda is installed and accessible."
+            error_msg += f"\nCurrent CONDA_EXE: {os.environ.get('CONDA_EXE', 'Not set')}"
+            error_msg += f"\nCurrent PATH: {os.environ.get('PATH', 'Not set')}"
+        logger.exception(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "message": "Pipeline execution failed - executable not found"
+        }
+    
     except Exception as e:
         error_msg = f"Failed to run simulation: {str(e)}"
         logger.exception(error_msg)
@@ -256,8 +307,11 @@ def test_bim2sim_environment(conda_env_name: str = 'bim2sim') -> bool:
         True if environment is available and bim2sim can be imported
     """
     try:
+        # Get conda executable path
+        conda_exe = _get_conda_executable()
+        
         cmd = [
-            "conda", "run", 
+            conda_exe, "run", 
             "-n", conda_env_name,
             "python", "-c", "import bim2sim; print('bim2sim available')"
         ]
@@ -341,7 +395,7 @@ def run_user_request(
     start_date: str,
     end_date: str,
     project_base_dir: Optional[Path] = None,
-    ep_install_path: str = 'C://EnergyPlusV9-4-0/',
+    ep_install_path: str = '/usr/local/EnergyPlus-9-4-0',
     conda_env_name: str = 'bim2sim'
 ) -> Dict[str, Any]:
     """

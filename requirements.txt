@@ -13,11 +13,11 @@ statsmodels>=0.14
 tensorflow>=2.16
 
 # ---------- PyTorch + ecosystem (CPU/GPU wheels decide at install) ----------────
-torch>=2.2
-torchvision>=0.17
-torchaudio>=2.2
-pytorch-lightning>=2.2
-pytorch-forecasting>=1.0
+#torch>=2.2
+#torchvision>=0.17
+#torchaudio>=2.2
+#pytorch-lightning>=2.2
+#pytorch-forecasting>=1.0
 
 # ----------──── hyper-param & experiment management ----------────
 optuna>=3.6
