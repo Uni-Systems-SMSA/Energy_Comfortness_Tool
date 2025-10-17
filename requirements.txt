@@ -30,6 +30,7 @@ tabulate
 # ----------──── visualisation ----------────
 matplotlib
 altair           # for Streamlit charts
+seaborn
 
 # ----------──── comfort, dashboards, explainability ----------────
 pythermalcomfort

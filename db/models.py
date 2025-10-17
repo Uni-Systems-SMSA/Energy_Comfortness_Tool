@@ -119,11 +119,12 @@ class Weather(Base):
 class TrainedModel(Base):
     __tablename__ = "trained_models"
     __table_args__ = (
-        UniqueConstraint("target", "version", name="uq_trained_models_target_version"),
+        UniqueConstraint("target", "version", "space_id", name="uq_trained_models_target_version_space"),
     )
 
     model_id        = Column(Integer, primary_key=True)
     target          = Column(String(65), nullable=False)
+    space_id        = Column(String, ForeignKey("spaces.space_id", ondelete="CASCADE"))
     algorithm       = Column(String(50), nullable=False)
     hyperparams     = Column(JSON)
     metrics         = Column(JSON)
@@ -133,6 +134,7 @@ class TrainedModel(Base):
     model_path      = Column(String,      nullable=False)
 
     predictions = relationship("Prediction", back_populates="model", cascade="all, delete-orphan")
+    space = relationship("Space", backref="trained_models")
 
 
 class Prediction(Base):

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 # versioning
-_VERSION = "0.0.13"
-_VERDATE = "01 Oct 2025"
+from __version__ import __version__ as _VERSION
 
 import os, sys, math, logging, importlib.util, shutil
 from pathlib import Path
@@ -3372,14 +3371,14 @@ def _predict():
                 from ece.feature_map import MAP as FEATURE_MAP, TIME_DRIVERS
                 from ece.pipeline_weather import ensure_complete_weather_data
                 
-                # Check for trained models
-                trained_models = ses.query(TrainedModel).all()
-                if not trained_models:
-                    st.session_state["model_error"] = "no_trained_models"
+                # Check if any trained models exist
+                models_count = ses.query(TrainedModel).count()
+                if models_count == 0:
+                    st.sidebar.error("❌ No trained models found. Please train models first.")
                     logger.exception("No trained models in database")
                     return
                 
-                logger.info(f"Found {len(trained_models)} trained models")
+                logger.info(f"Found {models_count} trained model(s) in database")
                 
                 # Get spaces to predict for
                 if selected_space:
@@ -3455,66 +3454,108 @@ def _predict():
                 df_base = pd.DataFrame(weather_data)
                 df_base = df_base.sort_values(['space_id', 'time_end'])
                 
-                # Generate predictions for each target using trained models
-                predictions = {}
+                # Generate predictions per space (use space-specific models)
+                all_predictions = []
+                unique_spaces = df_base['space_id'].unique()
                 
-                for model_record in trained_models:
-                    target = model_record.target
-                    model_path = Path(model_record.model_path)
+                logger.info(f"Generating predictions for {len(unique_spaces)} space(s): {', '.join(unique_spaces)}")
+                
+                for current_space_id in unique_spaces:
+                    logger.info(f"\n  [Predicting for space: {current_space_id}]")
                     
-                    if not model_path.exists():
-                        logger.warning(f"Model file not found: {model_path}")
+                    # Filter data for this space
+                    df_space = df_base[df_base['space_id'] == current_space_id].copy()
+                    logger.info(f"    - {len(df_space)} weather records for space {current_space_id}")
+                    
+                    # Get models trained for THIS specific space
+                    space_models = ses.query(TrainedModel).filter(
+                        TrainedModel.space_id == current_space_id
+                    ).all()
+                    
+                    if not space_models:
+                        logger.warning(f"    - No trained models found for space {current_space_id}, skipping")
                         continue
                     
-                    try:
-                        # Load the trained model
-                        model_data = joblib.load(model_path)
-                        model = model_data['model']
-                        features = model_data['features']
+                    logger.info(f"    - Found {len(space_models)} trained model(s) for space {current_space_id}")
+                    
+                    # Dictionary to store predictions for this space
+                    space_predictions = {}
+                    
+                    for model_record in space_models:
+                        target = model_record.target
+                        model_path = Path(model_record.model_path)
                         
-                        # Prepare feature data (add derived features)
-                        df_features = _add_derived_features_for_prediction(df_base.copy(), features)
-                        
-                        # Check which features are available for this model
-                        available_features = []
-                        missing_features = []
-                        
-                        for f in features:
-                            if f in TIME_DRIVERS:
-                                # Time features are generated automatically
-                                available_features.append(f)
-                            elif f in df_features.columns:
-                                available_features.append(f)
-                            else:
-                                missing_features.append(f)
-                        
-                        if missing_features:
-                            logger.warning(f"Missing features for {target}: {missing_features}")
-                        
-                        if len(available_features) < len(features) * 0.5:  # Need at least 50% of features
-                            logger.warning(f"Too many missing features for {target} ({len(missing_features)}/{len(features)})")
+                        if not model_path.exists():
+                            logger.warning(f"    - Model file not found: {model_path}")
                             continue
                         
-                        # Make predictions using available features
-                        X = df_features[available_features].fillna(0)  # Fill NaN with reasonable defaults
-                        if len(X) > 0:
-                            y_pred = model.predict(X)
-                            predictions[f'pred_{target}'] = y_pred
-                            logger.info(f"Generated {len(y_pred)} predictions for {target} using {len(available_features)}/{len(features)} features")
-                        
-                    except Exception as e:
-                        logger.exception(f"Error predicting {target}: {e}")
+                        try:
+                            # Load the trained model
+                            model_data = joblib.load(model_path)
+                            model = model_data['model']
+                            features = model_data['features']
+                            model_space_id = model_data.get('space_id', None)
+                            
+                            # Verify model was trained for this space
+                            if model_space_id and model_space_id != current_space_id:
+                                logger.warning(f"    - Model space_id mismatch: expected {current_space_id}, got {model_space_id}")
+                                continue
+                            
+                            # Prepare feature data (add derived features)
+                            df_features = _add_derived_features_for_prediction(df_space.copy(), features)
+                            
+                            # Check which features are available for this model
+                            available_features = []
+                            missing_features = []
+                            
+                            for f in features:
+                                if f in TIME_DRIVERS:
+                                    # Time features are generated automatically
+                                    available_features.append(f)
+                                elif f in df_features.columns:
+                                    available_features.append(f)
+                                else:
+                                    missing_features.append(f)
+                            
+                            if missing_features:
+                                logger.warning(f"    - Missing features for {target}: {missing_features}")
+                            
+                            if len(available_features) < len(features) * 0.5:  # Need at least 50% of features
+                                logger.warning(f"    - Too many missing features for {target} ({len(missing_features)}/{len(features)})")
+                                continue
+                            
+                            # Make predictions using available features
+                            X = df_features[available_features].fillna(0)  # Fill NaN with reasonable defaults
+                            if len(X) > 0:
+                                y_pred = model.predict(X)
+                                space_predictions[f'pred_{target}'] = y_pred
+                                logger.info(f"    - Generated {len(y_pred)} predictions for {target} using {len(available_features)}/{len(features)} features")
+                            
+                        except Exception as e:
+                            logger.exception(f"    - Error predicting {target}: {e}")
+                            continue
+                    
+                    if not space_predictions:
+                        logger.warning(f"    - No predictions generated for space {current_space_id}")
                         continue
+                    
+                    # Create prediction DataFrame for this space
+                    df_space_pred = df_space[['time_end', 'space_id']].copy()
+                    for pred_col, pred_values in space_predictions.items():
+                        df_space_pred[pred_col] = pred_values
+                    
+                    all_predictions.append(df_space_pred)
+                    logger.info(f"    - ✓ Completed predictions for space {current_space_id}: {len(space_predictions)} targets")
                 
-                if not predictions:
-                    st.sidebar.error("❌ Failed to generate any predictions. Check model files and features.")
-                    logger.exception("No predictions generated")
+                if not all_predictions:
+                    st.sidebar.error("❌ Failed to generate any predictions. Check that models exist for the selected space(s).")
+                    logger.exception("No predictions generated for any space")
                     return
                 
-                # Create prediction DataFrame
-                df_pred = df_base[['time_end', 'space_id']].copy()
-                for pred_col, pred_values in predictions.items():
-                    df_pred[pred_col] = pred_values
+                # Combine predictions from all spaces
+                df_pred = pd.concat(all_predictions, ignore_index=True)
+                df_pred = df_pred.sort_values(['space_id', 'time_end'])
+                logger.info(f"\n✓ Combined predictions: {len(df_pred)} total rows across {len(unique_spaces)} space(s)")
                 
                 # Add comfort analysis using the selected occupant profile
                 profile_id = st.session_state.get('occupant_profile', 'Profile1')
