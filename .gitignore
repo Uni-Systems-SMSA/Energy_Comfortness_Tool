@@ -183,6 +183,7 @@ cython_debug/
 # Project-specific ignores
 /catboost_info/
 /database/data/
+/docs/summaries/
 /model_reports/
 /model_store/
 /models/

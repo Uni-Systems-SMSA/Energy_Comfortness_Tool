@@ -78,7 +78,7 @@ def test_unicode_fixes():
             weather_file_path=weather_file,
             sensor_id=sensor_id,
             project_base_dir=project_base_dir,
-            ep_install_path='C://EnergyPlusV9-4-0/'
+            ep_install_path='/usr/local/EnergyPlus-9-4-0'
         )
         
         print("✅ Command building and execution completed")

@@ -48,6 +48,14 @@ Check energy-related database tables for data integrity.
 ### `check_timestamps.py`
 Validate timestamp consistency across energy data tables.
 
+### `check_db_schema.py` ⭐ **NEW**
+Diagnostic tool to compare actual database schema with expected SQLAlchemy model. Identifies missing or extra columns and tests query functionality.
+
+## Testing and Diagnostics Scripts
+
+### `test_dashboard_logging.py` ⭐ **NEW**
+Test script to verify dashboard logging configuration. Creates sample log entries and verifies that log files are created correctly in the logs directory.
+
 ## Data Cleanup and Maintenance Scripts
 
 ### `clean_predictions.py`

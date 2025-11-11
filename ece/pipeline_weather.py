@@ -276,7 +276,7 @@ def create_epw_header(
 
 # ---------------------------------------------------------------------
 def download_and_store_missing_weather(
-    sensor_id: str,
+    space_id: str,
     latitude: float,
     longitude: float,
     start: datetime,
@@ -286,13 +286,13 @@ def download_and_store_missing_weather(
     Download missing weather data from Open-Meteo API and store in database.
     
     Args:
-        sensor_id: Sensor identifier for weather data
+        space_id: Space identifier for weather data
         latitude: Location latitude
         longitude: Location longitude
         start: Start datetime for missing data period
         end: End datetime for missing data period
     """
-    logger.info(f"Downloading missing weather data for {sensor_id} from {start} to {end}")
+    logger.info(f"Downloading missing weather data for {space_id} from {start} to {end}")
     
     try:
         # Fetch data from Open-Meteo API
@@ -325,14 +325,14 @@ def download_and_store_missing_weather(
                     # Check if record already exists
                     existing = session.query(Weather).filter(
                         Weather.time_end == row['time_end'],
-                        Weather.sensor_id == sensor_id
+                        Weather.space_id == space_id
                     ).first()
                     
                     if existing is None:
                         # Create new record
                         weather_record = Weather(
                             time_end=row['time_end'],
-                            sensor_id=sensor_id,
+                            space_id=space_id,
                             outdoor_temperature_2m=float(row['temperature_2m']),
                             outdoor_relative_humidity_2m=float(row['relative_humidity_2m']),
                             wind_speed_10m=float(row['wind_speed_10m']),
@@ -354,13 +354,13 @@ def download_and_store_missing_weather(
             logger.info(f"Successfully stored {stored_count} new weather records in database")
             
     except Exception as e:
-        logger.error(f"Failed to download weather data: {e}")
+        logger.exception(f"Failed to download weather data: {e}")
         raise
 
 
 # ---------------------------------------------------------------------
 def ensure_complete_weather_data(
-    sensor_id: str,
+    space_id: str,
     latitude: float,
     longitude: float,
     start: datetime,
@@ -371,13 +371,13 @@ def ensure_complete_weather_data(
     Downloads missing data using both historical (archive) and forecast APIs.
     
     Args:
-        sensor_id: Sensor identifier for weather data
+        space_id: Space identifier for weather data
         latitude: Location latitude  
         longitude: Location longitude
         start: Start datetime for required period
         end: End datetime for required period
     """
-    logger.info(f"Ensuring complete weather data for {sensor_id} from {start} to {end}")
+    logger.info(f"Ensuring complete weather data for {space_id} from {start} to {end}")
     
     # Open-Meteo supports:
     # - Archive API: any date before today
@@ -399,7 +399,7 @@ def ensure_complete_weather_data(
         existing_count = (
             session.query(Weather)
             .filter(
-                Weather.sensor_id == sensor_id,
+                Weather.space_id == space_id,
                 Weather.time_end.between(start, effective_end)
             )
             .count()
@@ -419,7 +419,7 @@ def ensure_complete_weather_data(
         logger.info(f"Will use Archive API for dates before {today.date()} and Forecast API for {today.date()} onwards")
         
         download_and_store_missing_weather(
-            sensor_id=sensor_id,
+            space_id=space_id,
             latitude=latitude,
             longitude=longitude,
             start=start,
@@ -428,7 +428,7 @@ def ensure_complete_weather_data(
 
 # ---------------------------------------------------------------------
 def _fetch_weather_rows(
-        sensor_id: str,
+        space_id: str,
         start: datetime,
         end:   datetime,
         ses
@@ -437,21 +437,21 @@ def _fetch_weather_rows(
     Return a tidy DF whose **index is UTC time_end** and whose columns
     match the names your convert_units() function expects.
     """
-    logger.info(f"Fetching weather data for sensor {sensor_id} from {start} to {end}")
+    logger.info(f"Fetching weather data for space {space_id} from {start} to {end}")
     rows = (
         ses.query(Weather)
-           .filter(Weather.sensor_id == sensor_id,
+           .filter(Weather.space_id == space_id,
                    Weather.time_end.between(start, end))
            .order_by(Weather.time_end)
            .all()
     )
     if not rows:
-        raise RuntimeError(f"No weather rows for sensor {sensor_id} in period {start} to {end}")
+        raise RuntimeError(f"No weather rows for space {space_id} in period {start} to {end}")
 
     logger.info(f"Found {len(rows)} weather rows")
     df = (
         pd.DataFrame([r.__dict__ for r in rows])
-          .drop(columns=["_sa_instance_state", "weather_id", "sensor_id",
+          .drop(columns=["_sa_instance_state", "weather_id", "space_id",
                          "src", "fetched_at"], errors='ignore')
           .rename(columns={
               # match names used in convert_units()
@@ -493,7 +493,7 @@ def _fetch_weather_rows(
 
 # ---------------------------------------------------------------------
 def build_epw_from_db(
-        sensor_id: str,
+        space_id: str,
         start: datetime,
         end: datetime,
         *,
@@ -508,7 +508,7 @@ def build_epw_from_db(
     Generate an EPW file from weather data stored in the database.
     
     Args:
-        sensor_id: Sensor identifier for weather data
+        space_id: Space identifier for weather data
         start: Start datetime for data period
         end: End datetime for data period
         latitude: Location latitude for solar calculations
@@ -537,7 +537,7 @@ def build_epw_from_db(
 
     # ---- 1) DB - Fetch weather data -------------------------------------------------------
     with SessionLocal() as ses:
-        df_raw = _fetch_weather_rows(sensor_id, start, end, ses)
+        df_raw = _fetch_weather_rows(space_id, start, end, ses)
 
     # ---- 2) Convert units / derived fields ---------------------------
     logger.info("Converting weather data to EPW format")
@@ -597,7 +597,7 @@ def build_epw_from_db(
 # Full year EPW generation
 # ---------------------------------------------------------------------
 def _build_full_year_epw(
-    sensor_id: str,
+    space_id: str,
     start: datetime,
     end: datetime,
     latitude: float,
@@ -639,7 +639,7 @@ def _build_full_year_epw(
     # Ensure we have complete weather data for the effective period
     logger.info("Checking for complete weather data coverage...")
     ensure_complete_weather_data(
-        sensor_id=sensor_id,
+        space_id=space_id,
         latitude=latitude,
         longitude=longitude,
         start=full_year_start,
@@ -648,10 +648,10 @@ def _build_full_year_epw(
     
     # Now fetch the complete weather data from database
     with SessionLocal() as ses:
-        df_raw = _fetch_weather_rows(sensor_id, full_year_start, full_year_end, ses)
+        df_raw = _fetch_weather_rows(space_id, full_year_start, full_year_end, ses)
     
     if df_raw.empty:
-        raise RuntimeError(f"No weather data available for sensor {sensor_id} even after download attempt")
+        raise RuntimeError(f"No weather data available for space {space_id} even after download attempt")
     
     logger.info(f"Using {len(df_raw)} weather records for full year EPW")
     logger.info(f"Temperature range: {df_raw['temperature_2m'].min():.1f}°C to {df_raw['temperature_2m'].max():.1f}°C")
@@ -756,7 +756,7 @@ def _build_full_year_epw(
 # Example usage function
 # ---------------------------------------------------------------------
 def generate_epw_for_location(
-    sensor_id: str,
+    space_id: str,
     latitude: float,
     longitude: float,
     start: datetime,
@@ -768,7 +768,7 @@ def generate_epw_for_location(
     Convenience function to generate EPW file for a specific location and time period.
     
     Args:
-        sensor_id: Sensor identifier for weather data
+        space_id: Space identifier for weather data
         latitude: Location latitude
         longitude: Location longitude
         start: Start datetime for data period
@@ -788,15 +788,15 @@ def generate_epw_for_location(
     
     if full_year:
         # For full year EPW, use the year from start date
-        filename = f"weather_{sensor_id}_{start.year}_full_year.epw"
+        filename = f"weather_{space_id}_{start.year}_full_year.epw"
     else:
-        filename = f"weather_{sensor_id}_{start_str}_{end_str}.epw"
+        filename = f"weather_{space_id}_{start_str}_{end_str}.epw"
     
     output_path = output_dir / filename
     
     if full_year:
         return _build_full_year_epw(
-            sensor_id=sensor_id,
+            space_id=space_id,
             start=start,
             end=end,
             latitude=latitude,
@@ -805,7 +805,7 @@ def generate_epw_for_location(
         )
     else:
         return build_epw_from_db(
-            sensor_id=sensor_id,
+            space_id=space_id,
             start=start,
             end=end,
             latitude=latitude,

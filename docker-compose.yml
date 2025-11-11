@@ -2,11 +2,12 @@ services:
   database:
     image: postgres:17.0
     container_name: ect_db
+    restart: unless-stopped
     env_file:
       - ".env"
     volumes:
       - ./database/data:/var/lib/postgresql/data
-      - ./database/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+      # - ./database/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
 
     hostname: localhost
     ports:
