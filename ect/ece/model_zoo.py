@@ -313,57 +313,6 @@ class ProphetMulti(BaseWrapper):
         p = Path(folder) / f"prophet_{tag}.joblib"
         self.model = load(p)
 
-
-# --- add to ece/model_zoo.py ----------------------------------------
-import tensorflow as tf                 # pip install tensorflow
-from tensorflow.keras import layers, models
-import numpy as np
-
-class TabularRNNMulti(BaseWrapper):
-    """Simple GRU fed with (batch, 1, n_features) — no lagged seq needed."""
-
-    def _build(self):
-        n_f = len(self.features)
-        n_y = len(self.targets)
-        model = models.Sequential([
-            layers.Input(shape=(1, n_f)),
-            layers.GRU(32, activation="tanh"),
-            layers.Dense(64, activation="relu"),
-            layers.Dense(n_y)
-        ])
-        model.compile(optimizer="adam", loss="mse")
-        return model
-
-    # ------------------------------------------------------------------ fit
-    def fit(self, df_train: pd.DataFrame, df_val: pd.DataFrame | None = None):
-        X = df_train[self.features].to_numpy(dtype="float32")[:, None, :]  # add time axis
-        y = df_train[self.targets].to_numpy(dtype="float32")
-        X_val = y_val = None
-        if df_val is not None:
-            X_val = df_val[self.features].to_numpy(dtype="float32")[:, None, :]
-            y_val = df_val[self.targets].to_numpy(dtype="float32")
-        self.model.fit(
-            X, y,
-            epochs=20, batch_size=256, verbose=0,
-            validation_data=(X_val, y_val) if df_val is not None else None
-        )
-        return self
-
-    # ---------------------------------------------------------------- predict
-    def predict(self, df: pd.DataFrame) -> pd.DataFrame:
-        X = df[self.features].to_numpy(dtype="float32")[:, None, :]
-        pred = self.model.predict(X, verbose=0)
-        return pd.DataFrame(pred, columns=self.targets, index=df.index)
-
-    # save/load via Keras native
-    def save(self, tag: str, folder: Path | str = "models"):
-        p = Path(folder) / f"tabrnn_{tag}.keras"
-        self.model.save(p)
-
-    def load(self, tag: str, folder: Path | str = "models"):
-        p = Path(folder) / f"tabrnn_{tag}.keras"
-        self.model = models.load_model(p)
-
 # ---- ElasticNetMulti --------------------------------------------------
 from sklearn.linear_model import ElasticNet
 

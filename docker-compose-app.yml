@@ -1,0 +1,42 @@
+services:
+  ect-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ect-all-in-one
+    ports:
+      - "8599:8599"    # Streamlit dashboard - access at http://localhost:8599
+      - "5499:5432"    # PostgreSQL - connect at localhost:5499
+    volumes:
+      # Persistent PostgreSQL data
+      - ./database/data:/var/lib/postgresql/17/main
+      # Trained ML models
+      - ./models:/app/models
+      # Application logs
+      - ./logs:/app/logs
+      # Database exports/backups
+      - ./database/exports:/app/database/data
+    environment:
+      # PostgreSQL configuration
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-energy_comfort}
+      # ECT app configuration
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@localhost:5432/${POSTGRES_DB:-energy_comfort}
+      - PYTHONPATH=/app
+      - ENERGYPLUS_DIR=/usr/local/EnergyPlus
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8599/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - ect-network
+
+networks:
+  ect-network:
+    driver: bridge

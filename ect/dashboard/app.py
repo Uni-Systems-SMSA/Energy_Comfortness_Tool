@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 # versioning
-from __version__ import __version__ as _VERSION
+from ect.__version__ import __version__ as _VERSION
 
 import os, sys, math, logging, importlib.util, shutil
 from pathlib import Path
@@ -2097,11 +2097,11 @@ logger = get_logger(__name__)
 
 # --------------------- FILE LOCATIONS -------------------------
 LOGO      = Path("./dashboard/assets/images/logo.png")
-ECT_LOGO  = Path("./dashboard/assets/images/ect_logo.png")
-UNIS_LOGO = Path("./dashboard/assets/images/unis_logo.png")
-EU_LOGO   = Path("./dashboard/assets/images/eu_logo.png")
-FAVICON = Path("./dashboard/assets/images/favicon.ico")
-PROFILES  = Path("./dashboard/assets/config/occupant_profiles.csv")
+ECT_LOGO  = Path("./ect/dashboard/assets/images/ect_logo.png")
+UNIS_LOGO = Path("./ect/dashboard/assets/images/unis_logo.png")
+EU_LOGO   = Path("./ect/dashboard/assets/images/eu_logo.png")
+FAVICON = Path("./ect/dashboard/assets/images/favicon.ico")
+PROFILES  = Path("./ect/dashboard/assets/config/occupant_profiles.csv")
 
 DUMMY_TEXT = "  " \
 "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nullam vel odio a sem ullamcorper vehicula. Nulla eu porttitor dui. Aliquam commodo a lacus in tincidunt. Phasellus malesuada leo ac ullamcorper dictum. Vestibulum et orci magna. Suspendisse quis fringilla dui, ullamcorper elementum erat. Quisque luctus sem ipsum, at luctus nisi pretium ultricies. Mauris semper vehicula nisl in tristique. Etiam nec mi.  " \
