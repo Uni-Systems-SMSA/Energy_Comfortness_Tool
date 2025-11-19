@@ -160,7 +160,15 @@ def run_eplus_simulation_async(
     logger.info(f"Running EnergyPlus simulation for sensor {sensor_id}")
     logger.info(f"IFC file: {ifc_file_path}")
     logger.info(f"Weather file: {weather_file_path}")
+    logger.info(f"Project base dir: {project_base_dir}")
+    logger.info(f"EP install path: {ep_install_path}")
     logger.info(f"Command: {' '.join(cmd)}")
+    
+    # DEBUG: Log more details about paths
+    logger.info(f"DEBUG: IFC file absolute path: {Path(ifc_file_path).resolve()}")
+    logger.info(f"DEBUG: Weather file absolute path: {Path(weather_file_path).resolve()}")
+    if project_base_dir:
+        logger.info(f"DEBUG: Project dir absolute path: {Path(project_base_dir).resolve()}")
     
     # Log command arguments separately for Unicode debugging
     logger.info("Command arguments for Unicode debugging:")
@@ -175,6 +183,12 @@ def run_eplus_simulation_async(
         # Run the subprocess with real-time output capture
         logger.info("Starting EnergyPlus simulation subprocess...")
         
+        # Debug: Log the working directory
+        working_dir = Path(__file__).parent.parent
+        logger.info(f"DEBUG: BIM2SIM subprocess working directory: {working_dir}")
+        logger.info(f"DEBUG: BIM2SIM subprocess working directory exists: {working_dir.exists()}")
+        logger.info(f"DEBUG: Current Python working directory: {os.getcwd()}")
+        
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -182,7 +196,7 @@ def run_eplus_simulation_async(
             encoding='utf-8',
             errors='replace',  # Replace problematic Unicode characters
             timeout=3600,  # 1 hour timeout
-            cwd=Path(__file__).parent.parent,  # Run from project root
+            cwd=working_dir,  # Run from project root
             env={
                 **os.environ, 
                 'PYTHONIOENCODING': 'utf-8',  # Force UTF-8 encoding for Python subprocess

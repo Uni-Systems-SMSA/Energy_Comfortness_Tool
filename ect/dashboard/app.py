@@ -2093,7 +2093,8 @@ from ece.helpers import (                                   # noqa: E402
 
 # ------------------- project logger -------------------
 from ece.utils.logging import get_logger
-logger = get_logger(__name__)
+# Use explicit module name to avoid __main__.log when run by Streamlit
+logger = get_logger("ect.dashboard.app")
 
 # --------------------- FILE LOCATIONS -------------------------
 LOGO      = Path("./dashboard/assets/images/logo.png")
