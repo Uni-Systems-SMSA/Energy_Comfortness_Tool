@@ -183,7 +183,11 @@ def run_eplus_simulation_async(
             errors='replace',  # Replace problematic Unicode characters
             timeout=3600,  # 1 hour timeout
             cwd=Path(__file__).parent.parent,  # Run from project root
-            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}  # Force UTF-8 encoding for Python subprocess
+            env={
+                **os.environ, 
+                'PYTHONIOENCODING': 'utf-8',  # Force UTF-8 encoding for Python subprocess
+                'PYTHONPATH': '/app/bim2sim'  # Add bim2sim to Python path for conda environment
+            }
         )
         
         # Log all subprocess output for debugging

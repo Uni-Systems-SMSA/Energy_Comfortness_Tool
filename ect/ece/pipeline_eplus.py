@@ -11,12 +11,20 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+# Setup logging
+try:
+    from ece.utils.logging import init_logger
+    logger = init_logger(__name__)
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
+
 try:
     import bim2sim
     from bim2sim import Project, run_project, ConsoleDecisionHandler
     from bim2sim.utilities.types import IFCDomain
 except ImportError:
-    print("ERROR: bim2sim not available. Make sure you're running in the bim2sim conda environment.")
+    logger.error("bim2sim not available. Make sure you're running in the bim2sim conda environment.")
     sys.exit(1)
 
 
@@ -78,46 +86,46 @@ def run_energy_simulation(
         IFCDomain.arch: ifc_file_path,
     }
     
-    print(f"Creating EnergyPlus simulation project...")
-    print(f"  Project directory: {project_path}")
-    print(f"  IFC file: {ifc_file_path}")
-    print(f"  Weather file: {weather_file_path}")
-    print(f"  Sensor ID: {sensor_id}")
+    logger.info(f"Creating EnergyPlus simulation project...")
+    logger.info(f"  Project directory: {project_path}")
+    logger.info(f"  IFC file: {ifc_file_path}")
+    logger.info(f"  Weather file: {weather_file_path}")
+    logger.info(f"  Sensor ID: {sensor_id}")
     
     try:
         # Create a bim2sim project with energyplus backend
-        print(f"[bim2sim] Creating project with EnergyPlus backend...")
+        logger.info(f"Creating project with EnergyPlus backend...")
         project = Project.create(project_path, ifc_paths, 'energyplus')
         
         # Configure simulation settings
-        print(f"[bim2sim] Configuring simulation settings...")
+        logger.info(f"Configuring simulation settings...")
         project.sim_settings.weather_file_path = weather_file_path
         project.sim_settings.ep_install_path = ep_install_path
         project.sim_settings.run_full_simulation = True
         
-        print(f"[bim2sim] Weather file: {weather_file_path}")
-        print(f"[bim2sim] EnergyPlus path: {ep_install_path}")
-        print(f"[bim2sim] Starting simulation...")
-        print(f"[bim2sim] This may take several minutes depending on model complexity...")
+        logger.info(f"Weather file: {weather_file_path}")
+        logger.info(f"EnergyPlus path: {ep_install_path}")
+        logger.info(f"Starting simulation...")
+        logger.info(f"This may take several minutes depending on model complexity...")
         
         # Enable verbose logging for bim2sim
         import logging
         logging.getLogger('bim2sim').setLevel(logging.INFO)
         
         # Run the project with ConsoleDecisionHandler for interactive input
-        print(f"[bim2sim] Running project with ConsoleDecisionHandler...")
+        logger.info(f"Running project with ConsoleDecisionHandler...")
         run_project(project, ConsoleDecisionHandler())
         
-        print(f"[bim2sim] ✅ Simulation completed successfully!")
-        print(f"[bim2sim] Results saved to: {project_path}")
+        logger.info(f"✅ Simulation completed successfully!")
+        logger.info(f"Results saved to: {project_path}")
         
         # List generated files for debugging
         result_files = list(project_path.rglob("*"))
-        print(f"[bim2sim] Generated {len(result_files)} files:")
+        logger.info(f"Generated {len(result_files)} files:")
         for f in result_files[:10]:  # Show first 10 files
-            print(f"[bim2sim]   - {f.name}")
+            logger.debug(f"   - {f.name}")
         if len(result_files) > 10:
-            print(f"[bim2sim]   ... and {len(result_files) - 10} more files")
+            logger.info(f"   ... and {len(result_files) - 10} more files")
         
         # Return results dictionary
         results = {
@@ -133,12 +141,12 @@ def run_energy_simulation(
         
     except Exception as e:
         error_msg = f"Simulation failed: {str(e)}"
-        print(f"[bim2sim] ❌ ERROR: {error_msg}")
-        print(f"[bim2sim] Exception type: {type(e).__name__}")
+        logger.error(f"❌ ERROR: {error_msg}")
+        logger.error(f"Exception type: {type(e).__name__}")
         
         # Try to provide more detailed error information
         import traceback
-        print(f"[bim2sim] Full traceback:")
+        logger.exception(f"Full traceback:")
         traceback.print_exc()
         
         results = {

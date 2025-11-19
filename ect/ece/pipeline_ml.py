@@ -60,15 +60,39 @@ from ece.feature_map import MAP as FEATURE_MAP, TIME_DRIVERS  # noqa: E402
 
 try:
     from ece.utils.logging import get_logger  # type: ignore[attr-defined]
-except Exception:
+    logger = get_logger(__name__)
+except ImportError:
     import logging
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s – %(message)s")
-
-    def get_logger(name):  # type: ignore
-        return logging.getLogger(name)
-
-logger = get_logger(__name__)
+    from pathlib import Path
+    from logging.handlers import RotatingFileHandler
+    
+    # Configure module-specific logging
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True, parents=True)
+    
+    logger = logging.getLogger(__name__)
+    if not logger.handlers:
+        formatter = logging.Formatter("%(asctime)s — %(levelname)s — %(name)s — %(message)s")
+        
+        # File handler for this module
+        fh = RotatingFileHandler(
+            log_dir / f"{__name__}.log",
+            maxBytes=2_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        
+        # Console handler
+        sh = logging.StreamHandler()
+        sh.setLevel(logging.INFO)
+        sh.setFormatter(formatter)
+        logger.addHandler(sh)
+        
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
 
 # ---------------------------------------------------------------------------
 # Globals & regex

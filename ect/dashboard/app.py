@@ -3667,48 +3667,48 @@ def _test_database_state():
         st.error(f"Database test failed: {str(e)}")
         logger.exception(f"Database test error: {e}")
 
-# Dev Tools in expandable section
-with st.sidebar.expander("🔧 Dev Tools", expanded=False):
-    # Test DB State button
-    if st.button("🔍 Test DB State", help="Check database state and recent predictions"):
-        _test_database_state()
+# # Dev Tools in expandable section
+# with st.sidebar.expander("🔧 Dev Tools", expanded=False):
+#     # Test DB State button
+#     if st.button("🔍 Test DB State", help="Check database state and recent predictions"):
+#         _test_database_state()
 
-    # Reset and cache management buttons
-    reset_cache_col1, reset_cache_col2 = st.columns(2)
+#     # Reset and cache management buttons
+#     reset_cache_col1, reset_cache_col2 = st.columns(2)
 
-    # Clear Cache button
-    if reset_cache_col1.button("🧹 Clear Cache", help="Clear Streamlit's cache to free memory and force fresh data loading"):
-        _clear_cache()
+#     # Clear Cache button
+#     if reset_cache_col1.button("🧹 Clear Cache", help="Clear Streamlit's cache to free memory and force fresh data loading"):
+#         _clear_cache()
 
-    # Reset ALL button with confirmation
-    if reset_cache_col2.button("⚠ Reset ALL", type="primary", help="WARNING WARNING: This will delete ALL data and reset the workspace"):
-        # Initialize confirmation state
-        if 'reset_confirmation' not in st.session_state:
-            st.session_state.reset_confirmation = False
+#     # Reset ALL button with confirmation
+#     if reset_cache_col2.button("⚠ Reset ALL", type="primary", help="WARNING WARNING: This will delete ALL data and reset the workspace"):
+#         # Initialize confirmation state
+#         if 'reset_confirmation' not in st.session_state:
+#             st.session_state.reset_confirmation = False
         
-        # Show confirmation dialog
-        st.session_state.reset_confirmation = True
+#         # Show confirmation dialog
+#         st.session_state.reset_confirmation = True
 
-# Handle confirmation dialog
-if st.session_state.get('reset_confirmation', False):
-    with st.sidebar.container():
-        st.warning("⚠️ **CONFIRM RESET**")
-        st.write("This will permanently delete:")
-        st.write("- All measurements, predictions, and models")
-        st.write("- All energy simulation results")
-        st.write("- All uploaded files and weather data")
-        st.write("- All logs and reports")
+# # Handle confirmation dialog
+# if st.session_state.get('reset_confirmation', False):
+#     with st.sidebar.container():
+#         st.warning("⚠️ **CONFIRM RESET**")
+#         st.write("This will permanently delete:")
+#         st.write("- All measurements, predictions, and models")
+#         st.write("- All energy simulation results")
+#         st.write("- All uploaded files and weather data")
+#         st.write("- All logs and reports")
         
-        confirm_col1, confirm_col2 = st.columns(2)
+#         confirm_col1, confirm_col2 = st.columns(2)
         
-        if confirm_col1.button("✅ Yes, Reset", type="primary"):
-            st.session_state.reset_confirmation = False
-            _reset_all()
-            st.rerun()
+#         if confirm_col1.button("✅ Yes, Reset", type="primary"):
+#             st.session_state.reset_confirmation = False
+#             _reset_all()
+#             st.rerun()
             
-        if confirm_col2.button("❌ Cancel"):
-            st.session_state.reset_confirmation = False
-            st.rerun()
+#         if confirm_col2.button("❌ Cancel"):
+#             st.session_state.reset_confirmation = False
+#             st.rerun()
 # add UniSystems logo
 if UNIS_LOGO.exists():
     import base64

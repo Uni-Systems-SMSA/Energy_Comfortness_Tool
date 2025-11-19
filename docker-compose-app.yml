@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ect-all-in-one
+    container_name: ect-v1
     ports:
       - "8599:8599"    # Streamlit dashboard - access at http://localhost:8599
       - "5499:5432"    # PostgreSQL - connect at localhost:5499
@@ -16,6 +16,8 @@ services:
       - ./logs:/app/logs
       # Database exports/backups
       - ./database/exports:/app/database/data
+      # Energy simulation results
+      - ./eplus_sim:/app/eplus_sim
     environment:
       # PostgreSQL configuration
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
