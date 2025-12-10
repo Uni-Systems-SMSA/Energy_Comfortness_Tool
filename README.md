@@ -71,6 +71,12 @@ A comprehensive web-based tool for **indoor environmental quality (IEQ) predicti
 - **bim2sim conda environment**
 - **EnergyPlus v9.4**
 
+### Important Notice
+For EnergyPlus on linux, the default installation path is
+- `/usr/local/EnergyPlus-9-4-0`
+
+For running in Windows, it should be adjusted in `ece/pipeline_eplus_wrapper.py`.
+
 ### Installation
 
 #### Local Development Setup
