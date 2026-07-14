@@ -1,17 +1,44 @@
+version: '3.8'
+
 services:
+  # 1. PostgreSQL Database Service
   database:
-    image: postgres:17.0
+    image: postgres:17
     container_name: ect_db
     restart: unless-stopped
-    env_file:
-      - ".env"
+    command: -p 5442 # Sets PostgreSQL internal port to 5442 inside the container
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - ./database/data:/var/lib/postgresql/data
-      # - ./database/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
-
-    hostname: localhost
     ports:
-      - "5442:5432"
+      - "5442:5442" # Maps port 5442 internally, exposes 5442 externally to the host
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ect_admin -d ect_db -p 5442"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
-volumes:
-  ect_pgdata:
+  # 2. Main Web & Processing Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ect_streamlit_app
+    restart: always
+    ports:
+      - "8501:8501" # Exposes Streamlit Web UI
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT} 
+      - ECT_DATA_DIR=${ECT_DATA_DIR}
+    depends_on:
+      database:
+        condition: service_healthy
+    volumes:
+      - ./models:/app/models

@@ -11,6 +11,25 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+# Monkeypatch collections/eppy for compatibility with Python 3.10+ and older eppy versions
+import collections
+import collections.abc
+collections.MutableSequence = collections.abc.MutableSequence
+collections.Iterable = collections.abc.Iterable
+collections.Mapping = collections.abc.Mapping
+collections.MutableMapping = collections.abc.MutableMapping
+collections.Sequence = collections.abc.Sequence
+
+import eppy.modeleditor
+if not hasattr(eppy.modeleditor.IDF, 'removeallidfobjects'):
+    def removeallidfobjects(self, idfobject):
+        key = idfobject.key if hasattr(idfobject, 'key') else idfobject
+        if isinstance(key, str):
+            key = key.upper()
+        while len(self.idfobjects[key]) > 0:
+            self.popidfobject(key, 0)
+    eppy.modeleditor.IDF.removeallidfobjects = removeallidfobjects
+
 try:
     import bim2sim
     from bim2sim import Project, run_project, ConsoleDecisionHandler
@@ -94,6 +113,10 @@ def run_energy_simulation(
         project.sim_settings.weather_file_path = weather_file_path
         project.sim_settings.ep_install_path = ep_install_path
         project.sim_settings.run_full_simulation = True
+        # Use DesignDay sizing instead of Typical (SummerTypical/WinterTypical).
+        # The 'Typical' mode requires TypicalExtremeWeeks sections in the EPW file
+        # which are absent in Open-Meteo / programmatically generated EPW files.
+        project.sim_settings.system_weather_sizing = 'DesignDay'
         
         print(f"[bim2sim] Weather file: {weather_file_path}")
         print(f"[bim2sim] EnergyPlus path: {ep_install_path}")
@@ -106,7 +129,9 @@ def run_energy_simulation(
         
         # Run the project with ConsoleDecisionHandler for interactive input
         print(f"[bim2sim] Running project with ConsoleDecisionHandler...")
-        run_project(project, ConsoleDecisionHandler())
+        ret_val = run_project(project, ConsoleDecisionHandler())
+        if ret_val != 0:
+            raise RuntimeError("bim2sim execution finished but was not successful")
         
         print(f"[bim2sim] ✅ Simulation completed successfully!")
         print(f"[bim2sim] Results saved to: {project_path}")
