@@ -19,7 +19,8 @@ RUN curl -SLO https://github.com/conda-forge/miniforge/releases/latest/download/
 ENV PATH=$CONDA_DIR/bin:$PATH
 
 # Create the conda environment and install pythonocc-core (OCC) from conda-forge (Python 3.11 is required by bim2sim)
-RUN conda create -n bim2sim -c conda-forge python=3.11 pythonocc-core -y
+RUN conda install -c conda-forge python=3.11 pythonocc-core -y && \
+    conda clean -a -y
 
 # Install EnergyPlus v9.4.0 (Linux build from NatLabRockies)
 RUN curl -SLO https://github.com/NatLabRockies/EnergyPlus/releases/download/v9.4.0/EnergyPlus-9.4.0-998c4b761e-Linux-Ubuntu20.04-x86_64.tar.gz && \
@@ -37,9 +38,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Clone bim2sim, install dependencies, and manually copy all source files (including non-Python template/data files)
 # to site-packages, as pip install does not copy non-Python resources.
-RUN git clone --recursive https://github.com/BIM2SIM/bim2sim.git /tmp/bim2sim && \
-    conda run -n bim2sim pip install --no-cache-dir geomeppy numpy-stl /tmp/bim2sim && \
-    cp -r /tmp/bim2sim/bim2sim/* /opt/conda/envs/bim2sim/lib/python3.11/site-packages/bim2sim/ && \
+RUN git clone --recursive -b development --depth 1 --shallow-submodules https://github.com/BIM2SIM/bim2sim.git /tmp/bim2sim && \
+    pip install --no-cache-dir geomeppy numpy-stl /tmp/bim2sim && \
+    cp -r /tmp/bim2sim/bim2sim/* /opt/conda/lib/python3.11/site-packages/bim2sim/ && \
     rm -rf /tmp/bim2sim
 
 # Create a sitecustomize.py file inside the conda environment's site-packages to automatically 
@@ -50,7 +51,7 @@ collections.MutableSequence = collections.abc.MutableSequence; \
 collections.Iterable = collections.abc.Iterable; \
 collections.Mapping = collections.abc.Mapping; \
 collections.MutableMapping = collections.abc.MutableMapping; \
-collections.Sequence = collections.abc.Sequence" > /opt/conda/envs/bim2sim/lib/python3.11/site-packages/sitecustomize.py
+collections.Sequence = collections.abc.Sequence" > /opt/conda/lib/python3.11/site-packages/sitecustomize.py
 
 # Copy project files
 COPY . .

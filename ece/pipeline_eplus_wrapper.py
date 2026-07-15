@@ -83,7 +83,7 @@ def run_eplus_simulation_async(
     sensor_id: str,
     project_base_dir: Optional[Path] = None,
     ep_install_path: str = '/usr/local/EnergyPlus-9-4-0',
-    conda_env_name: str = 'bim2sim'
+    conda_env_name: str = 'base'
 ) -> Dict[str, Any]:
     """
     Run EnergyPlus simulation asynchronously using conda run.
@@ -292,7 +292,7 @@ def run_eplus_simulation_async(
         }
 
 
-def test_bim2sim_environment(conda_env_name: str = 'bim2sim') -> bool:
+def test_bim2sim_environment(conda_env_name: str = 'base') -> bool:
     """
     Test if the bim2sim conda environment is available and working.
     
@@ -396,7 +396,7 @@ def run_user_request(
     end_date: str,
     project_base_dir: Optional[Path] = None,
     ep_install_path: str = '/usr/local/EnergyPlus-9-4-0',
-    conda_env_name: str = 'bim2sim'
+    conda_env_name: str = 'base'
 ) -> Dict[str, Any]:
     """
     Run user request with automatic cross-year split-run support.

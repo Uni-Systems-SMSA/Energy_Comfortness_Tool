@@ -1619,7 +1619,7 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                     title=chart_title
                 )
                 
-                st.altair_chart(heating_chart, use_container_width=True)
+                st.altair_chart(heating_chart, width='stretch')
                 logger.debug("Heating chart displayed successfully")
         else:
             logger.info("No heating data found in energy results")
@@ -1724,7 +1724,7 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                     title=chart_title
                 )
                 
-                st.altair_chart(cooling_chart, use_container_width=True)
+                st.altair_chart(cooling_chart, width='stretch')
                 logger.debug("Cooling chart displayed successfully")
         else:
             logger.info("No cooling data found in energy results")
@@ -1825,7 +1825,7 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                     title=f"Energy Consumption by Space{' (Filtered Period)' if start_dt and end_dt else ''}"
                 )
                 
-                st.altair_chart(space_bar_chart, use_container_width=True)
+                st.altair_chart(space_bar_chart, width='stretch')
             
             with chart_col2:
                 st.markdown("**📊 Space Breakdown:**")
@@ -3973,7 +3973,7 @@ def _line_chart(df: pd.DataFrame, obs: str | None, pred: str):
         .properties(title=title)
         .interactive()
     )
-    st.altair_chart(line, use_container_width=True)
+    st.altair_chart(line, width='stretch')
 
 
 # ---------------------------------------------------------------------------
@@ -4017,7 +4017,7 @@ def _class_timeseries(df: pd.DataFrame, cols: list[str], *, title: str):
            .interactive()
     )
     logger.debug(f"Displaying timeseries chart for {title}...")
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width='stretch')
     logger.debug(f"Timeseries chart displayed successfully for {title}")
 
 def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "default") -> None:
@@ -4082,7 +4082,7 @@ def _pie_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "
             )
     )
     logger.debug(f"Displaying Altair chart for {class_col}...")
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width='stretch')
     logger.debug(f"Chart displayed successfully for {class_col}")
 
 def _stacked_bar_chart(df: pd.DataFrame, class_col: str, *, title: str, context: str = "default") -> None:
@@ -4163,7 +4163,7 @@ def _stacked_bar_chart(df: pd.DataFrame, class_col: str, *, title: str, context:
     )
     
     logger.debug(f"Displaying Altair stacked bar chart for {class_col}...")
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width='stretch')
     
     # Show summary statistics below the chart
     col1, col2, col3 = st.columns(3)
@@ -5110,7 +5110,7 @@ if st.session_state.get("predicted"):
                                     title='Heating vs Cooling Energy Distribution'
                                 )
                                 
-                                st.altair_chart(energy_bar_chart, use_container_width=True)
+                                st.altair_chart(energy_bar_chart, width='stretch')
                                 
                                 # Show energy breakdown as metrics
                                 energy_col1, energy_col2 = st.columns(2)
@@ -5183,7 +5183,7 @@ if st.session_state.get("predicted"):
                                         height=300
                                     )
                                     
-                                    st.altair_chart(heating_chart, use_container_width=True)
+                                    st.altair_chart(heating_chart, width='stretch')
                                 else:
                                     st.info("No heating data available")
                             
@@ -5211,7 +5211,7 @@ if st.session_state.get("predicted"):
                                         height=300
                                     )
                                     
-                                    st.altair_chart(cooling_chart, use_container_width=True)
+                                    st.altair_chart(cooling_chart, width='stretch')
                                 else:
                                     st.info("No cooling data available")
                             
@@ -5259,7 +5259,7 @@ if st.session_state.get("predicted"):
                                     height=400
                                 )
                                 
-                                st.altair_chart(combined_chart, use_container_width=True)
+                                st.altair_chart(combined_chart, width='stretch')
                         
                         else:
                             st.info("No hourly energy data available for time series charts")
@@ -5332,7 +5332,7 @@ if st.session_state.get("predicted"):
                                     title='Overall Comfort Score Over Time (Scale: 0-4, where 4 is best)'
                                 )
                                 
-                                st.altair_chart(overall_chart, use_container_width=True)
+                                st.altair_chart(overall_chart, width='stretch')
                                 
                                 # Show interpretation
                                 avg_comfort = comfort_data['overall_comfort'].mean()
