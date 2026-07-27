@@ -340,7 +340,7 @@ def download_and_store_missing_weather(
                             direct_radiation=float(row.get('direct_radiation', 0)),
                             precipitation=float(row.get('precipitation', 0)),
                             cloud_cover=float(row.get('cloud_cover', 0)),
-                            src='archive'
+                            src=row.get('src', 'archive')
                         )
                         session.add(weather_record)
                         stored_count += 1

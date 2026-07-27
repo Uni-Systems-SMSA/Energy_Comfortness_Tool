@@ -117,7 +117,7 @@ def run_energy_simulation(
         # The 'Typical' mode requires TypicalExtremeWeeks sections in the EPW file
         # which are absent in Open-Meteo / programmatically generated EPW files.
         project.sim_settings.system_weather_sizing = 'DesignDay'
-        
+        project.sim_settings.cooling_tz_overwrite = True
         print(f"[bim2sim] Weather file: {weather_file_path}")
         print(f"[bim2sim] EnergyPlus path: {ep_install_path}")
         print(f"[bim2sim] Starting simulation...")

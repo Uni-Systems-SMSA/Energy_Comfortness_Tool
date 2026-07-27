@@ -322,7 +322,7 @@ def process_cross_year(
     end_date: str,
     project_base_dir: Optional[Path] = None,
     ep_install_path: str = '/usr/local/EnergyPlus-9-4-0',
-    conda_env_name: str = 'bim2sim',
+    conda_env_name: str = 'base',
     eplus_wrapper_func=None
 ) -> Dict[str, Any]:
     """

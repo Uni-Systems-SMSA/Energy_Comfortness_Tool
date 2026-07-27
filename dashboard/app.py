@@ -364,10 +364,12 @@ def _load_space_names_from_csv(eplus_results_path: str) -> dict:
         Dictionary mapping zone IDs (uppercase) to space names, or empty dict if not found
     """
     try:
-        # Navigate to the space.csv file location
+        # Check space.csv inside results_dir directly or export_dir
         results_dir = Path(eplus_results_path)
-        export_dir = results_dir.parent.parent.parent  # Go up from SimResults/{uuid} to export/
-        space_csv_path = export_dir / "space.csv"
+        space_csv_path = results_dir / "space.csv"
+        if not space_csv_path.exists():
+            export_dir = results_dir.parent.parent.parent  # Go up from SimResults/{uuid} to export/
+            space_csv_path = export_dir / "space.csv"
         
         logger.debug(f"Looking for space.csv at: {space_csv_path}")
         
@@ -408,18 +410,19 @@ def _load_space_names_from_csv(eplus_results_path: str) -> dict:
         return {}
 
 
-def _get_energy_data_from_database(space_id: Optional[str] = None, limit: int = 1) -> Optional[dict]:
+def _get_energy_data_from_database(space_id: Optional[str] = None, building_id: Optional[str] = None, limit: int = 1) -> Optional[dict]:
     """
     Retrieve energy simulation data from the database.
     
     Args:
-        space_id: Optional space ID to filter by (if None, gets latest for any space)
+        space_id: Optional space ID to filter by
+        building_id: Optional building ID to filter by
         limit: Number of records to retrieve (default 1 for latest)
         
     Returns:
         Dictionary containing energy data in visualization format, or None
     """
-    logger.info(f"Retrieving energy data from database for space: {space_id or 'any'}")
+    logger.info(f"Retrieving energy data from database for building: {building_id or 'any'}, space: {space_id or 'any'}")
     
     try:
         with SessionLocal() as session:
@@ -427,9 +430,18 @@ def _get_energy_data_from_database(space_id: Optional[str] = None, limit: int = 
             start_dt = st.session_state.get('start_dt')
             end_dt = st.session_state.get('end_dt')
             
-            # Query for energy buildings - try to find one that matches the date range
-            buildings_query = session.query(EnergyBuilding).order_by(EnergyBuilding.simulation_timestamp.desc())
-            buildings = buildings_query.all()
+            # Query for energy buildings - filter by building_id if provided or derived from space_id
+            target_building_id = building_id
+            if not target_building_id and space_id:
+                space_rec = session.query(Space).filter(Space.space_id == space_id).first()
+                if space_rec:
+                    target_building_id = space_rec.building_id
+            
+            buildings_query = session.query(EnergyBuilding)
+            if target_building_id:
+                buildings_query = buildings_query.filter(EnergyBuilding.building_id == target_building_id)
+            
+            buildings = buildings_query.order_by(EnergyBuilding.simulation_timestamp.desc()).all()
             
             if not buildings:
                 logger.info("No energy simulation data found in database")
@@ -673,7 +685,7 @@ def _get_energy_data_from_database(space_id: Optional[str] = None, limit: int = 
                                                   for i in range(min(len(space_cooling_timeseries), len(cooling_timeseries)))]
                 
                 # Calculate filtered energy totals if date filtering is applied or space-specific mode
-                if (is_date_filtered or is_space_specific) and heating_timeseries and cooling_timeseries:
+                if (is_date_filtered or is_space_specific) and (heating_timeseries or cooling_timeseries):
                     # Calculate energy from power data (assuming hourly intervals)
                     filtered_heating_kwh = float(sum(heating_timeseries)) / 1000.0  # W to kWh for hourly data
                     filtered_cooling_kwh = float(sum(cooling_timeseries)) / 1000.0  # W to kWh for hourly data
@@ -853,24 +865,25 @@ def _get_latest_simulation_results() -> Optional[dict]:
         return None
 
 
-def _display_energy_results(simulation_results: dict, space_id: str) -> None:
+def _display_energy_results(simulation_results: dict, space_id: Optional[str] = None, building_id: Optional[str] = None) -> None:
     """
-    Display energy consumption results from EnergyPlus simulation.
+    Display energy consumption results from EnergyPlus simulation for a building.
     Only uses data from database - no CSV fallback.
     
     Args:
         simulation_results: Dictionary containing simulation results
-        space_id: Sensor identifier for the simulation
+        space_id: Sensor identifier for the simulation (optional)
+        building_id: Building identifier to filter by
     """
-    logger.info(f"Displaying energy results for sensor: {space_id}")
+    logger.info(f"Displaying energy results for building: {building_id or 'any'}")
     logger.debug(f"Simulation results keys: {list(simulation_results.keys())}")
     
     st.subheader("📊 Energy Analysis Results")
     
     try:
-        # Get energy data from database only
-        logger.info("Attempting to retrieve energy data from database")
-        energy_data = _get_energy_data_from_database(space_id=space_id if space_id != "latest" else None)
+        # Get energy data for the whole building from database (do NOT filter to single space_id)
+        logger.info("Attempting to retrieve building energy data from database")
+        energy_data = _get_energy_data_from_database(building_id=building_id)
         
         if energy_data:
             logger.info("SUCCESS Successfully retrieved energy data from database")
@@ -3673,6 +3686,25 @@ with st.sidebar.expander("🔧 Dev Tools", expanded=False):
     if st.button("🔍 Test DB State", help="Check database state and recent predictions"):
         _test_database_state()
 
+    # Dynamic Space Energy Query button
+    selected_space_dev = st.session_state.get("space_filter", "").strip()
+    target_space_dev = selected_space_dev if selected_space_dev else None
+    button_label = f"🔋 Test Energy Query ({selected_space_dev if selected_space_dev else 'All Spaces'})"
+    
+    if st.button(button_label, help="Query energy data from database for current selected space"):
+        st.write(f"Querying database for space_id = {selected_space_dev if selected_space_dev else 'All Spaces'}...")
+        data = _get_energy_data_from_database(space_id=target_space_dev)
+        if data:
+            st.success("✅ Query Successful!")
+            st.write(f"Heating: {data.get('heating', {}).get('total_energy_kwh', 0):.2f} kWh")
+            st.write(f"Cooling: {data.get('cooling', {}).get('total_energy_kwh', 0):.2f} kWh")
+            if 'zone_energy' in data:
+                st.write("Zones detected:")
+                for zone_id, zone_data in data['zone_energy'].items():
+                    st.write(f"- {zone_id}: {zone_data.get('heating_kwh', 0):.2f} kWh heating, {zone_data.get('cooling_kwh', 0):.2f} kWh cooling")
+        else:
+            st.warning(f"⚠️ No energy simulation data found for space_id = {selected_space_dev if selected_space_dev else 'All Spaces'}")
+
     # Reset and cache management buttons
     reset_cache_col1, reset_cache_col2 = st.columns(2)
 
@@ -4676,16 +4708,12 @@ if st.session_state.get("predicted"):
                 
                 # Display latest simulation results
                 def display_energy_simulation_results():
-                    """Display the latest energy simulation results if available."""
+                    """Display energy simulation results for selected building."""
                     try:
                         latest_results = _get_latest_simulation_results()
-                        if latest_results:
-                            # Use a default space_id or extract from results
-                            space_id = latest_results.get('space_id', 'latest')
-                            _display_energy_results(latest_results, space_id)
-                        else:
-                            # No results available - could show a message or do nothing
-                            logger.debug("No simulation results found to display")
+                        selected_building_tab = st.session_state.get("building_filter", "").strip()
+                        target_building = selected_building_tab if selected_building_tab else None
+                        _display_energy_results(latest_results or {}, space_id=None, building_id=target_building)
                     except Exception as e:
                         logger.exception(f"Error displaying simulation results: {e}")
                 
@@ -4942,7 +4970,7 @@ if st.session_state.get("predicted"):
                 # Get filtering parameters
                 start_dt = st.session_state.get('start_dt', None)
                 end_dt = st.session_state.get('end_dt', None)
-                sel = st.session_state.get("sensor_filter", "").strip()
+                sel = st.session_state.get("space_filter", "").strip()
                 space_filter_applied = bool(sel)
                 
                 # **Try to get energy data from database only**
