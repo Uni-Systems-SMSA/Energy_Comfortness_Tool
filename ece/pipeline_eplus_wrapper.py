@@ -83,7 +83,9 @@ def run_eplus_simulation_async(
     sensor_id: str,
     project_base_dir: Optional[Path] = None,
     ep_install_path: str = '/usr/local/EnergyPlus-9-4-0',
-    conda_env_name: str = 'base'
+    conda_env_name: str = 'base',
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Run EnergyPlus simulation asynchronously using conda run.
@@ -156,6 +158,11 @@ def run_eplus_simulation_async(
     if project_base_dir:
         project_dir_sanitized = _sanitize_path_for_subprocess(str(Path(project_base_dir).resolve()))
         cmd.extend(["--project-dir", project_dir_sanitized])
+        
+    if start_date:
+        cmd.extend(["--start-date", str(start_date)])
+    if end_date:
+        cmd.extend(["--end-date", str(end_date)])
     
     logger.info(f"Running EnergyPlus simulation for sensor {sensor_id}")
     logger.info(f"IFC file: {ifc_file_path}")

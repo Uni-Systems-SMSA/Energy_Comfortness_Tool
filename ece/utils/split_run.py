@@ -296,7 +296,7 @@ def generate_weather_for_subperiod(
         # Generate EPW file using the existing weather pipeline
         # Use full_year=False to generate only for the specific period
         epw_path = generate_epw_for_location(
-            space_id=subperiod_sensor_id,
+            space_id=sensor_id,
             latitude=latitude,
             longitude=longitude,
             start=start_dt,
@@ -430,7 +430,30 @@ def process_cross_year(
         
         # A3 & A4: Merge results
         logger.info("Merging all subperiod results")
-        merged_result = merge_runs(run_results, sensor_id)
+        csv_paths = []
+        years = []
+        for res in run_results:
+            if isinstance(res, dict) and res.get("success"):
+                proj_path_str = res.get("project_path")
+                if proj_path_str:
+                    csv_matches = list(Path(proj_path_str).rglob("eplusout.csv"))
+                    if csv_matches:
+                        csv_paths.append(csv_matches[0])
+                        years.append(res.get("metadata", {}).get("year"))
+
+        if csv_paths and len(csv_paths) == len(years):
+            df_merged = merge_runs(csv_paths, years)
+            merged_result = {
+                "success": True,
+                "csv_path": str(csv_paths[0]),
+                "row_count": len(df_merged),
+                "subperiods_completed": len(csv_paths)
+            }
+        else:
+            merged_result = {
+                "success": False,
+                "error": "Failed to collect output CSV files from subperiods"
+            }
         
         # Add cross-year metadata
         if merged_result.get("success", False):

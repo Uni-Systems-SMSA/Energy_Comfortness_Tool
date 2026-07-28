@@ -1599,7 +1599,10 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                     daily_avg = []
                     date_range = []
                 
-                logger.debug(f"Created {len(daily_avg)} daily averages for heating chart with date range {date_range[0]} to {date_range[-1]}")
+                if date_range:
+                    logger.debug(f"Created {len(daily_avg)} daily averages for heating chart with date range {date_range[0]} to {date_range[-1]}")
+                else:
+                    logger.debug(f"Created {len(daily_avg)} daily averages for heating chart with empty date range")
                 
                 # Create DataFrame for plotting with proper datetime
                 heating_df = pd.DataFrame({
@@ -1704,7 +1707,10 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                     daily_avg = []
                     date_range = []
                 
-                logger.debug(f"Created {len(daily_avg)} daily averages for cooling chart with date range {date_range[0]} to {date_range[-1]}")
+                if date_range:
+                    logger.debug(f"Created {len(daily_avg)} daily averages for cooling chart with date range {date_range[0]} to {date_range[-1]}")
+                else:
+                    logger.debug(f"Created {len(daily_avg)} daily averages for cooling chart with empty date range")
                 
                 # Create DataFrame for plotting with proper datetime
                 cooling_df = pd.DataFrame({
@@ -1958,44 +1964,47 @@ def _create_energy_visualizations(energy_data: dict, space_id: str, start_dt=Non
                         st.metric("Cooling Intensity", f"{cooling_intensity:.2f} kWh/m²")
         else:
             # Multiple zones view (building-wide or multiple spaces for one sensor)
-            # Create columns for zone data
-            if len(zone_energy) <= 3:
-                cols = st.columns(len(zone_energy))
+            if not zone_energy:
+                st.info("No space-specific breakdown available.")
             else:
-                cols = st.columns(3)
-                
-            for i, (zone_id, zone_data) in enumerate(zone_energy.items()):
-                col_idx = i % len(cols)
-                
-                with cols[col_idx]:
-                    # Get space name from space.csv mapping, fallback to zone_dict, then zone_id
-                    logger.debug(f"Processing zone: {zone_id}")
+                # Create columns for zone data
+                if len(zone_energy) <= 3:
+                    cols = st.columns(len(zone_energy))
+                else:
+                    cols = st.columns(3)
                     
-                    # Try case-insensitive lookup for space names
-                    zone_id_upper = zone_id.upper()
-                    if zone_id_upper in space_names:
-                        zone_name = space_names[zone_id_upper]
-                        logger.info(f"SUCCESS Using space name for zone {zone_id} (matched as {zone_id_upper}): '{zone_name}'")
-                    elif zone_id in zone_info:
-                        zone_name = zone_info[zone_id]
-                        logger.info(f"WARNING Using zone_dict name for zone {zone_id}: '{zone_name}'")
-                    else:
-                        zone_name = zone_id
-                        logger.warning(f"ERROR No mapping found for zone {zone_id} (tried {zone_id_upper}), using zone ID as display name")
+                for i, (zone_id, zone_data) in enumerate(zone_energy.items()):
+                    col_idx = i % len(cols)
                     
-                    st.markdown(f"** {zone_name}**")
-                    
-                    heating = zone_data.get('heating_kwh', 0)
-                    cooling = zone_data.get('cooling_kwh', 0)
-                    
-                    if heating > 0:
-                        st.metric("Heating", f"{heating:,.1f} kWh")
-                    if cooling > 0:
-                        st.metric("Cooling", f"{cooling:,.1f} kWh")
-                    
-                    total_zone = heating + cooling
-                    if total_zone > 0:
-                        st.metric("Total", f"{total_zone:,.1f} kWh")
+                    with cols[col_idx]:
+                        # Get space name from space.csv mapping, fallback to zone_dict, then zone_id
+                        logger.debug(f"Processing zone: {zone_id}")
+                        
+                        # Try case-insensitive lookup for space names
+                        zone_id_upper = zone_id.upper()
+                        if zone_id_upper in space_names:
+                            zone_name = space_names[zone_id_upper]
+                            logger.info(f"SUCCESS Using space name for zone {zone_id} (matched as {zone_id_upper}): '{zone_name}'")
+                        elif zone_id in zone_info:
+                            zone_name = zone_info[zone_id]
+                            logger.info(f"WARNING Using zone_dict name for zone {zone_id}: '{zone_name}'")
+                        else:
+                            zone_name = zone_id
+                            logger.warning(f"ERROR No mapping found for zone {zone_id} (tried {zone_id_upper}), using zone ID as display name")
+                        
+                        st.markdown(f"** {zone_name}**")
+                        
+                        heating = zone_data.get('heating_kwh', 0)
+                        cooling = zone_data.get('cooling_kwh', 0)
+                        
+                        if heating > 0:
+                            st.metric("Heating", f"{heating:,.1f} kWh")
+                        if cooling > 0:
+                            st.metric("Cooling", f"{cooling:,.1f} kWh")
+                        
+                        total_zone = heating + cooling
+                        if total_zone > 0:
+                            st.metric("Total", f"{total_zone:,.1f} kWh")
     
     elif 'zones' in energy_data or 'space_names' in energy_data:
         with st.expander(" Thermal Zone Details"):

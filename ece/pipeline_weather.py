@@ -656,14 +656,19 @@ def _build_full_year_epw(
     logger.info(f"Using {len(df_raw)} weather records for full year EPW")
     logger.info(f"Temperature range: {df_raw['temperature_2m'].min():.1f}°C to {df_raw['temperature_2m'].max():.1f}°C")
     
-    # Generate hourly timestamps for the full year (8760 hours)
+    # Generate hourly timestamps for the full calendar year (8760/8784 hours)
+    target_full_year_start = datetime(year, 1, 1, 0, 0, 0)
+    target_full_year_end = datetime(year, 12, 31, 23, 0, 0)
     full_year_timestamps = pd.date_range(
-        start=full_year_start,
-        end=full_year_end,
+        start=target_full_year_start,
+        end=target_full_year_end,
         freq='h'
     )
     
     logger.info(f"Creating full year EPW with {len(full_year_timestamps)} hours")
+    
+    # Reindex and forward/backward fill to guarantee complete 365-day coverage for EnergyPlus sizing
+    df_raw = df_raw.reindex(full_year_timestamps).ffill().bfill()
     
     # Since we now have real data, we can use it directly
     # Just ensure all required columns exist with reasonable defaults

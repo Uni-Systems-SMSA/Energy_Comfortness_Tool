@@ -44,7 +44,9 @@ def run_energy_simulation(
     weather_file_path: Path,
     sensor_id: str,
     project_base_dir: Optional[Path] = None,
-    ep_install_path: str = '/usr/local/EnergyPlus-9-4-0'
+    ep_install_path: str = '/usr/local/EnergyPlus-9-4-0',
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
 ) -> dict:
     """
     Run a building performance simulation with the EnergyPlus backend.
@@ -112,7 +114,24 @@ def run_energy_simulation(
         print(f"[bim2sim] Configuring simulation settings...")
         project.sim_settings.weather_file_path = weather_file_path
         project.sim_settings.ep_install_path = ep_install_path
-        project.sim_settings.run_full_simulation = True
+        
+        if start_date and end_date:
+            try:
+                s_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                e_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                project.sim_settings.run_full_simulation = False
+                project.sim_settings.set_run_period = True
+                project.sim_settings.run_period_start_month = s_dt.month
+                project.sim_settings.run_period_start_day = s_dt.day
+                project.sim_settings.run_period_end_month = e_dt.month
+                project.sim_settings.run_period_end_day = e_dt.day
+                print(f"[bim2sim] Custom RunPeriod configured: {start_date} -> {end_date}")
+            except Exception as e_date:
+                print(f"[bim2sim] WARNING: Failed to parse dates ({start_date}, {end_date}): {e_date}. Falling back to full run.")
+                project.sim_settings.run_full_simulation = True
+        else:
+            project.sim_settings.run_full_simulation = True
+
         # Use DesignDay sizing instead of Typical (SummerTypical/WinterTypical).
         # The 'Typical' mode requires TypicalExtremeWeeks sections in the EPW file
         # which are absent in Open-Meteo / programmatically generated EPW files.
@@ -274,6 +293,20 @@ Examples:
     )
     
     parser.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        help="Simulation start date (YYYY-MM-DD)"
+    )
+    
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        default=None,
+        help="Simulation end date (YYYY-MM-DD)"
+    )
+    
+    parser.add_argument(
         "--output-json",
         type=str,
         default=None,
@@ -289,7 +322,9 @@ Examples:
             weather_file_path=Path(args.weather),
             sensor_id=args.sensor,
             project_base_dir=Path(args.project_dir) if args.project_dir else None,
-            ep_install_path=args.ep_path
+            ep_install_path=args.ep_path,
+            start_date=args.start_date,
+            end_date=args.end_date
         )
         
         # Output results as JSON
