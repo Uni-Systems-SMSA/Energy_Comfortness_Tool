@@ -18,6 +18,7 @@ from sqlalchemy import (
     JSON,
     MetaData,
     ForeignKey,
+    Text,
     text,
 )
 from sqlalchemy.ext.declarative import declarative_base
@@ -303,6 +304,26 @@ class EnergyTimeSeries(Base):
     
     # Relationships
     space = relationship("EnergySpace", back_populates="energy_timeseries")
+
+
+class IFCSimulationJob(Base):
+    """
+    Tracks automated execution jobs for IFC building models.
+    """
+    __tablename__ = "ifc_simulation_jobs"
+
+    job_id = Column(Integer, primary_key=True)
+    building_name = Column(String, nullable=False)     # Human-readable name (e.g. "CERTH Smart House")
+    folder_name = Column(String, nullable=False, unique=True) # Directory name under etc/ifc/
+    ifc_file_path = Column(String, nullable=False)     # Relative path to IFC file
+    config_file_path = Column(String, nullable=True)   # Relative path to config.json (if present)
+    status = Column(String(20), nullable=False, default="PENDING") # PENDING, RUNNING, OK, FAILED
+    last_run_timestamp = Column(DateTime, nullable=True)
+    last_run_duration_sec = Column(Float, nullable=True)
+    log_file_path = Column(String, nullable=True)     # Path to execution log file
+    error_message = Column(Text, nullable=True)        # Full error stacktrace on failure
+    created_at = Column(DateTime, server_default=text("now()"))
+    updated_at = Column(DateTime, server_default=text("now()"), onupdate=dt.datetime.now)
 
 
 # ---------------------------------------------------------------------------

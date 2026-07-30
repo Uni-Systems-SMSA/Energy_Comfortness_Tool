@@ -178,11 +178,107 @@ energy_comfortness_tool/
 ### 4. **Energy Simulation Workflow**
 ```
 ⚡ Energy Tab → Run Energy Simulation
-├── 🏗️ IFC model processed with bim2sim
-├── 🌤️ EPW weather file generated from sensor data
-├── 🏃‍♂️ EnergyPlus simulation executed
-├── 💾 Results stored in database with timestamps
-└── 📊 Energy consumption visualized by zone/time
+├── 🏗️ IFC model processed headlessly with bim2sim
+├── 🌤️ EPW weather file generated from Open-Meteo weather API
+├── 🏃‍♂️ EnergyPlus simulation executed automatically
+├── 💾 Results stored in PostgreSQL with strict date windowing
+└── 📊 Energy consumption visualized by space & time
+```
+
+## ⚙️ Headless Building Simulation & Batch Scheduler
+
+The ECT engine includes an automated batch scheduler (`ece/batch_scheduler.py`) that scans `etc/ifc/` for building subfolders, runs EnergyPlus simulations headlessly via `bim2sim`, and populates PostgreSQL time-series records without needing UI button interaction.
+
+### 📁 Adding a New Building
+To register a new building model for automatic simulation, place it in a dedicated subfolder under `etc/ifc/`:
+```
+etc/ifc/
+├── CERTH_House/
+│   ├── CERTH_HOUSE_DUMMY_v02.ifc
+│   └── logs/
+└── CAPELLA/
+    ├── DS02_Capella Brancacci_Florence_V3.ifc
+    ├── decisions.json
+    └── logs/
+```
+* **`decisions.json` (Optional):** Pre-configures `bim2sim` classification decisions for unidentified elements (`IfcBuildingElementProxy`) and construction year to allow 100% headless execution.
+* **Logs Location:** Simulation logs are written to `etc/ifc/{BUILDING_FOLDER}/logs/{BUILDING_FOLDER}_{TIMESTAMP}.log`.
+
+---
+
+### 🚀 Manually Triggering Simulations (CLI & Docker)
+
+#### ⭐ **MAIN EXECUTION COMMAND (All Buildings & Custom Date Ranges)**
+To run or preload building simulations for **all building models** across **any specific date range**, use this primary command:
+
+```bash
+docker exec -it ect_streamlit_app conda run -n base python -c "
+from ece.batch_scheduler import run_batch_scheduler
+run_batch_scheduler(start_date='2026-01-01', end_date='2026-08-12')
+"
+```
+*(Simply adjust `start_date` and `end_date` to any desired period, e.g. `'2024-01-01'` to `'2025-01-01'` for historical preloading).*
+
+---
+
+#### Option 1: Run Default Window (Current Year + 14-Day Forecast)
+Runs all pending building simulations using automatic default dates:
+```bash
+docker exec -it ect_streamlit_app conda run -n base python -c "
+from ece.batch_scheduler import run_batch_scheduler
+print(run_batch_scheduler())
+"
+```
+
+#### Option 2: Preload Multi-Year Historical & Forecast Datasets
+```bash
+# Preload 2024
+docker exec -it ect_streamlit_app conda run -n base python -c "
+from ece.batch_scheduler import run_batch_scheduler
+run_batch_scheduler(start_date='2024-01-01', end_date='2025-01-01')
+"
+
+# Preload 2025
+docker exec -it ect_streamlit_app conda run -n base python -c "
+from ece.batch_scheduler import run_batch_scheduler
+run_batch_scheduler(start_date='2025-01-01', end_date='2026-01-01')
+"
+
+# Preload 2026
+docker exec -it ect_streamlit_app conda run -n base python -c "
+from ece.batch_scheduler import run_batch_scheduler
+run_batch_scheduler(start_date='2026-01-01', end_date='2026-08-12')
+"
+```
+
+#### Option 3: Force Rerun a Specific Building
+Reset a building's job status to `PENDING` and trigger execution:
+```bash
+docker exec -it ect_streamlit_app conda run -n base python -c "
+from db.session import SessionLocal
+from db.models import IFCSimulationJob
+from ece.batch_scheduler import run_batch_scheduler
+
+with SessionLocal() as ses:
+    job = ses.query(IFCSimulationJob).filter(IFCSimulationJob.folder_name == 'CAPELLA').first()
+    if job:
+        job.status = 'PENDING'
+        job.last_run_timestamp = None
+        ses.commit()
+
+res = run_batch_scheduler()
+print('Execution Result:', res)
+"
+```
+
+#### Option 4: Run a Single IFC Model via EnergyPlus Wrapper Script
+Directly run the lower-level EnergyPlus pipeline for a specific file:
+```bash
+docker exec -it ect_streamlit_app conda run -n base python /app/ece/pipeline_eplus.py \
+  --ifc "/app/etc/ifc/CAPELLA/DS02_Capella Brancacci_Florence_V3.ifc" \
+  --weather "/app/eplus_sim/weather/weather_Living Room_2026_full_year.epw" \
+  --sensor "Living Room" \
+  --ep-path "/usr/local/EnergyPlus-9-4-0"
 ```
 
 ## 📈 Feature Highlights

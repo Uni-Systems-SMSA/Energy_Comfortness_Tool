@@ -110,6 +110,15 @@ def run_energy_simulation(
         print(f"[bim2sim] Creating project with EnergyPlus backend...")
         project = Project.create(project_path, ifc_paths, 'energyplus')
         
+        # Copy pre-configured decisions.json if present in the IFC building folder
+        decisions_src = ifc_file_path.parent / "decisions.json"
+        if decisions_src.exists():
+            import shutil
+            from bim2sim.kernel import decision as decision_mod
+            shutil.copy(decisions_src, project_path / "decisions.json")
+            project.loaded_decisions = decision_mod.load(project_path / "decisions.json")
+            print(f"[bim2sim] Loaded {len(project.loaded_decisions or {})} pre-configured decisions from {decisions_src}")
+        
         # Configure simulation settings
         print(f"[bim2sim] Configuring simulation settings...")
         project.sim_settings.weather_file_path = weather_file_path

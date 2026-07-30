@@ -202,3 +202,6 @@ energy_debug.log
 # IDE files
 .vscode/
 .idea/
+
+# IFC Building Folders
+/etc/ifc/

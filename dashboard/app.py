@@ -39,6 +39,18 @@ from ece.weather_api import fetch_open_meteo
 from ece.pipeline_weather import generate_epw_for_location  # type: ignore
 from ece.pipeline_eplus_wrapper import run_eplus_simulation_async, test_bim2sim_environment, run_user_request  # type: ignore
 
+def _get_default_ifc_path() -> Optional[Path]:
+    """Dynamically find the first available .ifc file under etc/ifc/* subdirectories."""
+    etc_ifc_dir = Path(__file__).parent.parent / "etc" / "ifc"
+    if etc_ifc_dir.exists():
+        for b_folder in sorted([d for d in etc_ifc_dir.iterdir() if d.is_dir()]):
+            ifc_files = list(b_folder.glob("*.ifc"))
+            if ifc_files:
+                return ifc_files[0]
+    return None
+
+DEFAULT_IFC_PATH = _get_default_ifc_path()
+
 
 def _convert_decimal_to_float(value):
     """
@@ -57,7 +69,7 @@ def _convert_decimal_to_float(value):
 
 
 def _store_energy_simulation_results(simulation_results: dict, space_id: str, 
-                                   ifc_file_path: str, epw_file_path: str) -> bool:
+                                   ifc_file_path: str, epw_file_path: str, end_date: Optional[Any] = None) -> bool:
     """
     Store energy simulation results in the database with timestamped energy data.
     
@@ -81,12 +93,10 @@ def _store_energy_simulation_results(simulation_results: dict, space_id: str,
             
             if not space_record:
                 logger.warning(f"Space {space_id} not found in database, creating default entry")
-                # Get coordinates from session state or use defaults
-                lat = st.session_state.get('init_lat', 40.6401)
-                lon = st.session_state.get('init_lon', 22.9444)
-                
-                # Check if there's a building_id in session state from CSV upload
-                default_building_id = st.session_state.get('current_building_id', f"building_{space_id}")
+                # Use standard default coordinates and building ID
+                lat = 40.6401
+                lon = 22.9444
+                default_building_id = f"building_{space_id}"
                 
                 # Create a default space if it doesn't exist
                 space_record = Space(
@@ -136,50 +146,56 @@ def _store_energy_simulation_results(simulation_results: dict, space_id: str,
             # Extract simulation metadata
             simulation_timestamp = datetime.now()
             
-            # Always extract the simulation year from the EPW file, not from session state
-            # The session state dates are for filtering/viewing, not for the actual simulation period
-            simulation_year = _get_simulation_year_from_epw(actual_results_dir)
-            if simulation_year:
+            # Extract target end date limit from end_date parameter
+            target_end_dt = end_date
+            if target_end_dt:
+                if not isinstance(target_end_dt, datetime) and hasattr(target_end_dt, 'year'):
+                    target_end_dt = datetime.combine(target_end_dt, datetime.max.time())
+                elif hasattr(target_end_dt, 'tzinfo') and target_end_dt.tzinfo is not None:
+                    target_end_dt = target_end_dt.replace(tzinfo=None)
+
+            # Use actual parsed simulation timestamps if available, otherwise fallback to EPW year
+            if energy_data.get('timestamps') and len(energy_data['timestamps']) > 0:
+                timestamps = [ts for ts in energy_data['timestamps'] if pd.notna(ts)]
+                
+                # Truncate timestamps and series to target_end_dt if specified
+                if target_end_dt and timestamps:
+                    timestamps = [ts for ts in timestamps if ts <= target_end_dt]
+                    logger.info(f"Truncated simulation timestamps to target end date {target_end_dt}: {len(timestamps)} points remaining")
+
+                if timestamps:
+                    simulation_start = timestamps[0]
+                    simulation_end = timestamps[-1]
+                    logger.info(f"Using parsed simulation date range: {simulation_start} to {simulation_end}")
+                else:
+                    simulation_year = _get_simulation_year_from_epw(actual_results_dir) or 2024
+                    simulation_start = datetime(simulation_year, 1, 1)
+                    simulation_end = datetime(simulation_year, 12, 31)
+            else:
+                simulation_year = _get_simulation_year_from_epw(actual_results_dir) or 2024
                 simulation_start = datetime(simulation_year, 1, 1)
                 simulation_end = datetime(simulation_year, 12, 31)
-                logger.info(f"Using EPW file simulation period: {simulation_start} to {simulation_end}")
-            else:
-                # Fallback to 2024 if EPW year extraction fails
-                simulation_year = 2024
-                simulation_start = datetime(simulation_year, 1, 1) 
-                simulation_end = datetime(simulation_year, 12, 31)
-                logger.warning(f"Could not extract year from EPW, using default 2024: {simulation_start} to {simulation_end}")
+                logger.info(f"Fallback to simulation period: {simulation_start} to {simulation_end}")
             
-            # Calculate building-level totals
-            total_heating_kwh = energy_data.get('heating', {}).get('total_energy_kwh', 0)
-            total_cooling_kwh = energy_data.get('cooling', {}).get('total_energy_kwh', 0)
+            # Prepare time series data
+            heating_timeseries = energy_data.get('heating', {}).get('hourly_data', [])
+            cooling_timeseries = energy_data.get('cooling', {}).get('hourly_data', [])
+            
+            if energy_data.get('timestamps') and len(energy_data['timestamps']) > len(timestamps):
+                limit_len = len(timestamps)
+                heating_timeseries = heating_timeseries[:limit_len]
+                cooling_timeseries = cooling_timeseries[:limit_len]
+
+            # Calculate building-level totals from (possibly truncated) timeseries data
+            total_heating_kwh = sum(heating_timeseries) if heating_timeseries else energy_data.get('heating', {}).get('total_energy_kwh', 0)
+            total_cooling_kwh = sum(cooling_timeseries) if cooling_timeseries else energy_data.get('cooling', {}).get('total_energy_kwh', 0)
             total_energy_kwh = total_heating_kwh + total_cooling_kwh
             
-            peak_heating_w = energy_data.get('heating', {}).get('peak_rate_w', 0)
-            peak_cooling_w = energy_data.get('cooling', {}).get('peak_rate_w', 0)
+            peak_heating_w = max(heating_timeseries) * 1000.0 if heating_timeseries else energy_data.get('heating', {}).get('peak_rate_w', 0)
+            peak_cooling_w = max(cooling_timeseries) * 1000.0 if cooling_timeseries else energy_data.get('cooling', {}).get('peak_rate_w', 0)
             
-            # Get zone count
             zone_energy = energy_data.get('zone_energy', {})
             zones_count = len(zone_energy)
-            
-            logger.info(f"Energy data parsing summary:")
-            logger.info(f"   - Heating data: {'YES' if 'heating' in energy_data else 'NO'}")
-            logger.info(f"   - Cooling data: {'YES' if 'cooling' in energy_data else 'NO'}")
-            logger.info(f"   - Zone energy data: {'YES' if zone_energy else 'NO'} ({zones_count} zones)")
-            logger.info(f"   - Space names: {'YES' if energy_data.get('space_names') else 'NO'} ({len(energy_data.get('space_names', {}))} names)")
-            
-            if zone_energy:
-                logger.debug(f"   - Zone IDs found: {list(zone_energy.keys())}")
-                for zone_id, zone_data in zone_energy.items():
-                    has_heating_ts = bool(zone_data.get('heating_timeseries'))
-                    has_cooling_ts = bool(zone_data.get('cooling_timeseries'))
-                    logger.debug(f"     Zone '{zone_id}': heating_ts={has_heating_ts}, cooling_ts={has_cooling_ts}")
-            else:
-                logger.warning("   No zone energy data means EnergySpace and EnergyTimeSeries records will NOT be created!")
-            
-            # Prepare time series data (limit to reasonable size for database storage)
-            heating_timeseries = energy_data.get('heating', {}).get('hourly_data', [])[:8760]  # Max 1 year
-            cooling_timeseries = energy_data.get('cooling', {}).get('hourly_data', [])[:8760]  # Max 1 year
             
             # Get file paths from simulation results or use the function parameters as fallback
             weather_file_path = simulation_results.get('weather_file', epw_file_path)
@@ -215,15 +231,17 @@ def _store_energy_simulation_results(simulation_results: dict, space_id: str,
             spaces_skipped = 0
             timeseries_points_created = 0
             
-            # Create datetime range for the time series data
-            num_data_points = max(len(heating_timeseries), len(cooling_timeseries))
-            if num_data_points > 0:
-                # Create hourly timestamps from simulation start (EnergyPlus generates hourly data)
-                timestamps = [simulation_start + timedelta(hours=i) for i in range(num_data_points)]
-                logger.debug(f"Creating {num_data_points} hourly timestamped data points from {timestamps[0]} to {timestamps[-1]}")
+            # Use already truncated timestamps if available
+            if timestamps and len(timestamps) > 0:
+                logger.info(f"Using {len(timestamps)} truncated simulation timestamps from {timestamps[0]} to {timestamps[-1]}")
             else:
-                timestamps = []
-                logger.warning("No time series data available for timestamp creation")
+                num_data_points = max(len(heating_timeseries), len(cooling_timeseries))
+                if num_data_points > 0:
+                    timestamps = [simulation_start + timedelta(hours=i) for i in range(num_data_points)]
+                    logger.debug(f"Creating {num_data_points} hourly timestamped data points from {timestamps[0]} to {timestamps[-1]}")
+                else:
+                    timestamps = []
+                    logger.warning("No time series data available for timestamp creation")
             
             for zone_id, zone_data in zone_energy.items():
                 # Get zone name from space mapping (case-insensitive lookup)
@@ -1135,111 +1153,68 @@ def _parse_csv_file(csv_file: Path, start_dt=None, end_dt=None) -> dict:
         df = pd.read_csv(csv_file)
         logger.info(f"CSV loaded successfully: {len(df)} rows, {len(df.columns)} columns")
         
-        # Filter by time range if provided
+        # Always search for and parse Date/Time column if present
+        time_cols = [col for col in df.columns if any(word in col.lower() for word in ['date', 'time', 'hour', 'timestamp'])]
+        time_col = time_cols[0] if time_cols else None
+        logger.debug(f"Found potential time columns: {time_cols}")
+        
+        if time_col:
+            try:
+                # EnergyPlus CSV files often have complex datetime formats ("01/01  01:00:00")
+                if 'Date/Time' in time_col:
+                    simulation_year = _get_simulation_year_from_epw(csv_file.parent)
+                    if simulation_year is None:
+                        simulation_year = start_dt.year if start_dt and hasattr(start_dt, 'year') else datetime.now().year
+                        logger.warning(f"WARNING Could not extract year from EPW, using fallback year: {simulation_year}")
+                    else:
+                        logger.info(f"SUCCESS Using simulation year from EPW: {simulation_year}")
+                    
+                    df_temp = df[time_col].copy()
+                    
+                    def fix_eplus_datetime(date_str):
+                        if isinstance(date_str, str) and '/' in date_str:
+                            cleaned = date_str.strip()
+                            parts = cleaned.split()
+                            if len(parts) == 2:
+                                date_part, time_part = parts[0], parts[1]
+                                if time_part.startswith('24:'):
+                                    time_part = '00:' + time_part[3:]
+                                    dt = pd.to_datetime(f"{simulation_year}/{date_part} {time_part}", format='%Y/%m/%d %H:%M:%S', errors='coerce')
+                                    if pd.notna(dt):
+                                        return dt + pd.Timedelta(days=1)
+                                return pd.to_datetime(f"{simulation_year}/{date_part} {time_part}", format='%Y/%m/%d %H:%M:%S', errors='coerce')
+                        return pd.to_datetime(date_str, errors='coerce')
+                    
+                    df[time_col] = df[time_col].apply(fix_eplus_datetime)
+                else:
+                    df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+                
+                if not df[time_col].isna().all():
+                    parsed_count = df[time_col].notna().sum()
+                    logger.info(f"SUCCESS Successfully parsed {parsed_count}/{len(df)} EnergyPlus dates")
+            except Exception as e:
+                logger.warning(f"Could not parse time column '{time_col}': {e}. Using all data.")
+        
+        # Apply date filtering if requested
         if start_dt is not None and end_dt is not None:
             logger.warning(f"DATE FILTERING APPLIED during CSV parsing: {start_dt} to {end_dt}")
-            logger.warning("This should ONLY happen during visualization, NOT during simulation storage!")
-            # Check if there's a Date/Time column in the CSV
-            time_cols = [col for col in df.columns if any(word in col.lower() for word in ['date', 'time', 'hour', 'timestamp'])]
-            logger.debug(f"Found potential time columns: {time_cols}")
-            
-            if time_cols:
-                # Try to parse the first time column found
-                time_col = time_cols[0]
-                try:
-                    # EnergyPlus CSV files often have complex datetime formats
-                    # Common formats: "01/01  01:00:00", "MM/DD  HH:MM:SS" (without year)
-                    if 'Date/Time' in time_col:
-                        # Handle EnergyPlus Date/Time format
-                        # Get the actual simulation year from the EPW weather file
-                        simulation_year = _get_simulation_year_from_epw(csv_file.parent)
-                        
-                        if simulation_year is None:
-                            # Fallback to user's selected year if EPW extraction fails
-                            simulation_year = start_dt.year
-                            logger.warning(f"WARNING Could not extract year from EPW, using selected year: {simulation_year}")
-                        else:
-                            logger.info(f"SUCCESS Using simulation year from EPW: {simulation_year}")
-                        
-                        # Try to add year to EnergyPlus format
-                        df_temp = df[time_col].copy()
-                        
-                        # Handle formats like " 01/01  01:00:00" (with leading space) by adding year
-                        try:
-                            # Clean and add year to EnergyPlus datetime format
-                            def fix_eplus_datetime(date_str):
-                                if isinstance(date_str, str) and '/' in date_str:
-                                    # Remove leading/trailing whitespace and handle double spaces
-                                    cleaned = date_str.strip()
-                                    if '  ' in cleaned:  # Double space format
-                                        date_part, time_part = cleaned.split('  ', 1)
-                                        # Add year and join with single space
-                                        return f"{simulation_year}/{date_part.strip()} {time_part.strip()}"
-                                    elif ' ' in cleaned:  # Single space format
-                                        date_part, time_part = cleaned.split(' ', 1)
-                                        return f"{simulation_year}/{date_part.strip()} {time_part.strip()}"
-                                return date_str
-                            
-                            # Apply the cleaning and year addition
-                            df_cleaned = df_temp.apply(fix_eplus_datetime)
-                            logger.debug(f"Sample cleaned datetime strings: {df_cleaned.head(3).tolist()}")
-                            
-                            # Try parsing with the expected format
-                            df[time_col] = pd.to_datetime(df_cleaned, format='%Y/%m/%d %H:%M:%S', errors='coerce')
-                            
-                            # Check if parsing worked
-                            if not df[time_col].isna().all():
-                                parsed_count = df[time_col].notna().sum()
-                                logger.info(f"SUCCESS Successfully parsed {parsed_count}/{len(df)} EnergyPlus dates with year {simulation_year}")
-                            else:
-                                # Fallback to pandas auto-detection
-                                df[time_col] = pd.to_datetime(df_cleaned, errors='coerce')
-                                parsed_count = df[time_col].notna().sum()
-                                if parsed_count > 0:
-                                    logger.info(f"SUCCESS Parsed {parsed_count}/{len(df)} dates using pandas auto-detection")
-                                else:
-                                    logger.warning("ERROR All EnergyPlus date parsing attempts failed, using fallback parsing")
-                                    df[time_col] = pd.to_datetime(df_temp, errors='coerce')
-                        except Exception as e:
-                            # Fallback to standard parsing
-                            df[time_col] = pd.to_datetime(df_temp, errors='coerce')
-                            logger.warning(f"EnergyPlus date parsing failed: {e}, using fallback parsing")
-                    else:
-                        df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
-                    
-                    # Only filter if we successfully parsed datetime
-                    if not df[time_col].isna().all():
-                        # Convert start_dt and end_dt to timezone-naive for comparison with EnergyPlus data
-                        start_compare = start_dt.replace(tzinfo=None) if hasattr(start_dt, 'tzinfo') else start_dt
-                        end_compare = end_dt.replace(tzinfo=None) if hasattr(end_dt, 'tzinfo') else end_dt
-                        
-                        # Log date ranges for debugging
-                        logger.info(f"Filtering data: requested range {start_compare} to {end_compare}")
-                        if len(df) > 0:
-                            logger.info(f"CSV date range: {df[time_col].min()} to {df[time_col].max()}")
-                        
-                        # Filter data by time range
-                        mask = (df[time_col] >= start_compare) & (df[time_col] <= end_compare)
-                        df_filtered = df[mask].copy()
-                        logger.info(f"Time filtering applied: {len(df)} -> {len(df_filtered)} rows (range: {start_compare} to {end_compare})")
-                        
-                        if len(df_filtered) > 0:
-                            df = df_filtered
-                            logger.info(f"SUCCESS Successfully filtered to {len(df)} rows for the requested time period")
-                        else:
-                            logger.warning("ERROR Time filtering resulted in empty dataset. Using all data.")
-                            logger.warning(f"Check if simulation year {simulation_year} matches requested dates {start_compare.year}")
-                    else:
-                        logger.warning(f"Could not parse any dates in column '{time_col}'. Using all data.")
-                        
-                except Exception as e:
-                    logger.warning(f"Could not parse time column '{time_col}': {e}. Using all data.")
-            else:
-                logger.info("No recognizable time columns found in CSV. EnergyPlus simulations should have Date/Time data.")
+            if time_col and not df[time_col].isna().all():
+                start_compare = start_dt.replace(tzinfo=None) if hasattr(start_dt, 'tzinfo') else start_dt
+                end_compare = end_dt.replace(tzinfo=None) if hasattr(end_dt, 'tzinfo') else end_dt
+                
+                mask = (df[time_col] >= start_compare) & (df[time_col] <= end_compare)
+                df_filtered = df[mask].copy()
+                logger.info(f"Time filtering applied: {len(df)} -> {len(df_filtered)} rows")
+                if len(df_filtered) > 0:
+                    df = df_filtered
         else:
             logger.info("No date filtering applied - parsing complete simulation data")
-            logger.debug("This is correct behavior when storing simulation results")
-        
+
+        # Store parsed timestamps if available
+        if time_col and time_col in df.columns and not df[time_col].isna().all():
+            data['timestamps'] = df[time_col].tolist()
+            logger.info(f"Stored {len(data['timestamps'])} parsed timestamps in energy_data")
+
         # Find heating and cooling energy columns
         heating_cols = [col for col in df.columns if 'Heating Energy [J]' in col]
         cooling_cols = [col for col in df.columns if 'Cooling Energy [J]' in col]
@@ -1253,63 +1228,45 @@ def _parse_csv_file(csv_file: Path, start_dt=None, end_dt=None) -> dict:
         if heating_cols:
             logger.debug("Processing heating data")
             logger.info(f"HEATING Processing heating data from {len(df)} filtered rows")
-            heating_data = []
-            for col in heating_cols:
-                col_data = df[col].fillna(0).tolist()
-                heating_data.extend(col_data)
-                logger.debug(f"Added {len(col_data)} values from column: {col}")
+            # Sum across all zone columns for each timestep to get true building hourly heating rate (in Joules)
+            building_heating_j = df[heating_cols].sum(axis=1).fillna(0)
+            total_j = float(building_heating_j.sum())
+            total_kwh = total_j / 3600000.0
+            peak_w = float(building_heating_j.max()) / 3600.0 if len(building_heating_j) > 0 else 0.0  # J/hr to W
             
-            # Remove zeros and calculate statistics
-            heating_nonzero = [x for x in heating_data if x > 0]
-            logger.info(f"Heating data: {len(heating_data)} total values, {len(heating_nonzero)} non-zero values")
+            # Convert J to kWh for each hourly timestep
+            hourly_kwh = (building_heating_j / 3600000.0).tolist()
             
-            if heating_nonzero:
-                total_j = sum(heating_nonzero)
-                total_kwh = total_j / 3600000
-                peak_w = max(heating_nonzero)
-                
-                # Log detailed calculation info
-                logger.info(f"DATA Heating calculation from {len(df)} filtered rows: {total_kwh:.1f} kWh total, {peak_w:.0f} W peak")
-                
-                data['heating'] = {
-                    'total_energy_j': total_j,
-                    'total_energy_kwh': total_kwh,
-                    'peak_rate_w': peak_w,
-                    'hourly_data': heating_nonzero[:8760],  # Limit to one year
-                    'zones_detected': len(heating_cols)
-                }
-                logger.info(f"Heating summary: {total_kwh:.1f} kWh total, {peak_w:.0f} W peak, {len(heating_cols)} zones")
+            data['heating'] = {
+                'total_energy_j': total_j,
+                'total_energy_kwh': total_kwh,
+                'peak_rate_w': peak_w,
+                'hourly_data': hourly_kwh,
+                'zones_detected': len(heating_cols)
+            }
+            logger.info(f"Heating summary: {total_kwh:.1f} kWh total, {peak_w:.0f} W peak, {len(heating_cols)} zones, {len(hourly_kwh)} hours")
         
         # Process cooling data  
         if cooling_cols:
             logger.debug("Processing cooling data")
             logger.info(f"COOLING Processing cooling data from {len(df)} filtered rows")
-            cooling_data = []
-            for col in cooling_cols:
-                col_data = df[col].fillna(0).tolist()
-                cooling_data.extend(col_data)
-                logger.debug(f"Added {len(col_data)} values from column: {col}")
+            # Sum across all zone columns for each timestep to get true building hourly cooling rate (in Joules)
+            building_cooling_j = df[cooling_cols].sum(axis=1).fillna(0)
+            total_j = float(building_cooling_j.sum())
+            total_kwh = total_j / 3600000.0
+            peak_w = float(building_cooling_j.max()) / 3600.0 if len(building_cooling_j) > 0 else 0.0  # J/hr to W
             
-            # Remove zeros and calculate statistics
-            cooling_nonzero = [x for x in cooling_data if x > 0]
-            logger.info(f"Cooling data: {len(cooling_data)} total values, {len(cooling_nonzero)} non-zero values")
+            # Convert J to kWh for each hourly timestep
+            hourly_kwh = (building_cooling_j / 3600000.0).tolist()
             
-            if cooling_nonzero:
-                total_j = sum(cooling_nonzero)
-                total_kwh = total_j / 3600000
-                peak_w = max(cooling_nonzero)
-                
-                # Log detailed calculation info
-                logger.info(f"DATA Cooling calculation from {len(df)} filtered rows: {total_kwh:.1f} kWh total, {peak_w:.0f} W peak")
-                
-                data['cooling'] = {
-                    'total_energy_j': total_j,
-                    'total_energy_kwh': total_kwh,
-                    'peak_rate_w': peak_w,
-                    'hourly_data': cooling_nonzero[:8760],  # Limit to one year
-                    'zones_detected': len(cooling_cols)
-                }
-                logger.info(f"Cooling summary: {total_kwh:.1f} kWh total, {peak_w:.0f} W peak, {len(cooling_cols)} zones")
+            data['cooling'] = {
+                'total_energy_j': total_j,
+                'total_energy_kwh': total_kwh,
+                'peak_rate_w': peak_w,
+                'hourly_data': hourly_kwh,
+                'zones_detected': len(cooling_cols)
+            }
+            logger.info(f"Cooling summary: {total_kwh:.1f} kWh total, {peak_w:.0f} W peak, {len(cooling_cols)} zones, {len(hourly_kwh)} hours")
                 
         # Extract zone-specific data (filter by space.csv)
         logger.info("SEARCH Extracting zone-specific energy data from CSV columns")
@@ -2211,28 +2168,40 @@ _CLASS_ORDER = ["A", "B", "C", "D", "NC"]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=30)
 def _get_building_ids() -> list[str]:
-    """Return all distinct building_id values (sorted) from the DB."""
-    with SessionLocal() as ses:
-        from db.models import Space
-        rows = (
-            ses.query(Space.building_id)
-               .filter(Space.building_id != None)  # noqa: E711
-               .distinct()
-               .all()
-        )
-    return sorted(r[0] for r in rows if r[0])
+    """Return all distinct building_id / folder_name values (sorted) from DB and jobs."""
+    buildings = set()
+    try:
+        with SessionLocal() as ses:
+            from db.models import Space, IFCSimulationJob, EnergyBuilding
+            job_rows = ses.query(IFCSimulationJob.building_name).filter(IFCSimulationJob.status == "OK").all()
+            for r in job_rows:
+                if r[0]: buildings.add(r[0])
+
+            eb_rows = ses.query(EnergyBuilding.building_id).distinct().all()
+            for r in eb_rows:
+                if r[0]: buildings.add(r[0])
+
+            rows = ses.query(Space.building_id).filter(Space.building_id != None).distinct().all()
+            for r in rows:
+                if r[0]: buildings.add(r[0])
+    except Exception as e:
+        logger.exception(f"Error querying building IDs: {e}")
+        
+    return sorted(list(buildings))
 
 def _get_space_ids(building_id: str = None) -> list[str]:
-    """Return all distinct space_id values (sorted) from the DB, optionally filtered by building."""
+    """Return all distinct space_id / zone_name values (sorted) from EnergySpace strictly filtered by building."""
     with SessionLocal() as ses:
-        from db.models import Space
-        query = ses.query(Space.space_id).filter(Space.space_id != None)  # noqa: E711
+        from db.models import EnergySpace, EnergyBuilding
+        query = ses.query(EnergySpace.zone_name)
         if building_id:
-            query = query.filter(Space.building_id == building_id)
+            query = query.join(EnergyBuilding, EnergySpace.energy_building_id == EnergyBuilding.energy_building_id).filter(EnergyBuilding.building_id == building_id)
         rows = query.distinct().all()
-    return sorted(r[0] for r in rows if r[0])
+        if rows:
+            return sorted(list(set(r[0] for r in rows if r[0])))
+    return []
 
 def _is_system_configured() -> bool:
     """Check if the system has been configured with data (spaces, measurements, or models)."""
@@ -2829,6 +2798,7 @@ def _handle_initialization(csv_file, ifc_file):
         st.cache_data.clear()
         st.session_state['show_initialize_modal'] = False
         st.session_state['latest_ifc_path'] = str(ifc_path)
+        st.session_state['ifc_is_default'] = False
         
         st.success(f"✅ Initialization complete! CSV processed and IFC file saved as {ifc_filename}")
         logger.info(f"Initialization completed: CSV processed, IFC saved to {ifc_path}")
@@ -2883,6 +2853,7 @@ def _handle_ifc_upload(ifc_file):
         # Store in session state
         st.session_state['latest_ifc_path'] = str(ifc_path)
         st.session_state['uploaded_ifc_path'] = str(ifc_path)
+        st.session_state['ifc_is_default'] = False
         
         # Show success message
         file_size_mb = len(ifc_file.getbuffer()) / (1024 * 1024)
@@ -2998,14 +2969,14 @@ if st.session_state.get('show_initialize_modal', False):
 
 # Dynamic date limits based on when the application is run
 CURRENT_DATE = datetime.now(tz=timezone.utc)   # Current date when app is run
-TIME_BEFORE_LIMIT = timedelta(days=365 * 2)    # 2 years before current date
+TIME_BEFORE_LIMIT = timedelta(days=365 * 3)    # 3 years before current date
 TIME_AFTER_LIMIT = timedelta(days=14)          # 14 days after current date
 
-min_limit = CURRENT_DATE - TIME_BEFORE_LIMIT   # earliest selectable (2 years before current date)
+min_limit = CURRENT_DATE - TIME_BEFORE_LIMIT   # earliest selectable (3 years before current date)
 max_limit = CURRENT_DATE + TIME_AFTER_LIMIT    # latest selectable (14 days from current date)
 
-DEFAULT_START = date(2025, 6, 15)
-DEFAULT_END   = date(2025, 7, 15)
+DEFAULT_START = date(2026, 1, 1)
+DEFAULT_END   = max_limit.date()
 
 # Time window in expandable section
 with st.sidebar.expander("📅 Time Window", expanded=False):
@@ -3031,11 +3002,6 @@ with st.sidebar.expander("📅 Time Window", expanded=False):
     # Date validation: Check if start date is after end date
     if start > end:
         st.error("⚠️ **Invalid date range**: Start date cannot be later than end date. Please adjust your selection.")
-        st.info(f"📅 Current selection: {start} to {end}")
-        # Reset to valid default dates if user has invalid selection
-        if st.button("🔄 Reset to Default Dates"):
-            st.session_state['reset_dates'] = True
-            st.rerun()
     else:
         # Show current valid selection
         if start != end:
@@ -4804,7 +4770,7 @@ if st.session_state.get("predicted"):
                             
                             if simulation_results.get("success", False):
                                 storage_success = _store_energy_simulation_results(
-                                    simulation_results, target_sensor, str(ifc_path), str(epw_path)
+                                    simulation_results, target_sensor, str(ifc_path), str(epw_path), end_date=end_datetime
                                 )
                                 if storage_success:
                                     progress_bar.progress(100)
@@ -4850,75 +4816,64 @@ if st.session_state.get("predicted"):
                     
                     else:
                         # Main UI when simulation is NOT running
-                        st.subheader("🏗️ EnergyPlus Building Simulation")
-                    
-                        # Check simulation readiness
-                        # Check for IFC from session state (configured via sidebar Configure)
-                        latest_ifc_path = st.session_state.get('latest_ifc_path')
-                        space_ids = _get_space_ids()
-                        has_weather_data = len(space_ids) > 0
-                        has_ifc = latest_ifc_path is not None
-                        
-                        # Get date range from sidebar configuration
-                        start_dt = st.session_state.get('start_dt')
-                        end_dt = st.session_state.get('end_dt')
-                        start = start_dt.date() if start_dt else date(2024, 1, 1)
-                        end = end_dt.date() if end_dt else date(2024, 1, 31)
-                        
-                        # Get target sensor from sidebar configuration
-                        target_sensor = st.session_state.get('space_filter')  # This is selected_sensor from sidebar
-                        
-                        # Requirements check
-                        simulation_ready = has_ifc and has_weather_data and target_sensor is not None
-                        
-                        # Simulation Control
-                        st.subheader("🏃‍♂️ Simulation Control")
-                        
-                        # Show requirements status
-                        req_col1, req_col2 = st.columns(2)
-                        with req_col1:
-                            if has_ifc:
-                                ifc_filename = Path(latest_ifc_path).name
-                                st.success(f"✅ IFC File: `{ifc_filename}`")
-                            else:
-                                st.warning("⚠️ IFC file required (use Configure button in sidebar)")
-                            
-                            if has_weather_data:
-                                st.success(f"✅ Weather data: {len(space_ids)} sensors")
-                            else:
-                                st.error("❌ Weather data required (upload training data)")
-                        
-                        with req_col2:
-                            if target_sensor:
-                                st.success(f"✅ Target sensor: `{target_sensor}` (from sidebar)")
-                            else:
-                                st.warning("⚠️ Select target sensor in sidebar")
-                            
-                            date_range_valid = start <= end
-                            if date_range_valid:
-                                days = (end - start).days + 1
-                                st.success(f"✅ Date range: {days} days (from sidebar)")
-                            else:
-                                st.error("❌ Invalid date range (check sidebar)")
-                        
-                        # Main simulation button
-                        if st.button(
-                            "🏃‍♂️ Run Energy Simulation", 
-                            disabled=not simulation_ready,
-                            key="run_energy_simulation",
-                            help="Generate weather file and run complete energy simulation" if simulation_ready else "Fix requirements above first",
-                        ):
-                            if simulation_ready:
-                                # Enhanced logging for debugging
-                                logger.info(f"TRIGGER: Energy simulation button clicked")
-                                logger.info(f"TRIGGER: IFC={st.session_state.get('latest_ifc_path')}")
-                                logger.info(f"TRIGGER: Space={st.session_state.get('space_filter')}")
-                                logger.info(f"TRIGGER: Dates={st.session_state.get('start_dt')} to {st.session_state.get('end_dt')}")
+                        st.subheader("🏗️ Automated Multi-Building Energy Simulations")
+
+                        # Trigger background batch scheduler sync
+                        try:
+                            from ece.batch_scheduler import run_batch_scheduler, discover_and_sync_ifc_jobs
+                            from db.models import IFCSimulationJob
+
+                            # Auto-sync jobs and check date range data availability
+                            with SessionLocal() as ses:
+                                discover_and_sync_ifc_jobs(ses)
                                 
-                                st.session_state.simulation_running = True
-                                st.session_state.keep_energy_tab = True
-                                logger.info("Energy simulation flags set - triggering rerun")
-                                st.rerun()
+                                # Selected date range from sidebar
+                                sel_start = st.session_state.get('start_dt')
+                                sel_end = st.session_state.get('end_dt')
+                                
+                                if sel_start and hasattr(sel_start, 'date'):
+                                    s_dt_val = datetime.combine(sel_start.date(), datetime.min.time())
+                                else:
+                                    s_dt_val = datetime(2026, 1, 1)
+
+                                if sel_end and hasattr(sel_end, 'date'):
+                                    e_dt_val = datetime.combine(sel_end.date(), datetime.max.time())
+                                else:
+                                    e_dt_val = datetime.now() + timedelta(days=14)
+
+                                pending_jobs = ses.query(IFCSimulationJob).filter(IFCSimulationJob.status == "PENDING").count()
+
+                                if pending_jobs > 0:
+                                    with st.spinner(f"🔄 Executing automated EnergyPlus pipeline for {pending_jobs} pending building job(s)..."):
+                                        run_batch_scheduler(start_date=s_dt_val, end_date=e_dt_val)
+                                        st.cache_data.clear()
+                                        st.rerun()
+
+                                # Query all simulation jobs
+                                all_jobs = ses.query(IFCSimulationJob).order_by(IFCSimulationJob.job_id.asc()).all()
+
+                            if all_jobs:
+                                st.markdown("#### 📋 Multi-IFC Building Job Registry")
+                                job_table_data = []
+                                for j in all_jobs:
+                                    status_badge = "✅ OK" if j.status == "OK" else ("🏃 RUNNING" if j.status == "RUNNING" else ("❌ FAILED" if j.status == "FAILED" else "⏳ PENDING"))
+                                    last_run_str = j.last_run_timestamp.strftime("%Y-%m-%d %H:%M:%S") if j.last_run_timestamp else "Never"
+                                    duration_str = f"{j.last_run_duration_sec:.1f}s" if j.last_run_duration_sec else "-"
+                                    job_table_data.append({
+                                        "Building": j.building_name,
+                                        "Folder": j.folder_name,
+                                        "Status": status_badge,
+                                        "Last Executed": last_run_str,
+                                        "Duration": duration_str,
+                                        "Log File": j.log_file_path or "-"
+                                    })
+                                st.dataframe(pd.DataFrame(job_table_data), use_container_width=True)
+                            else:
+                                st.info("ℹ️ No building directories found under `etc/ifc/`.")
+
+                        except Exception as e:
+                            logger.exception(f"Error checking batch scheduler status: {e}")
+                            st.warning("⚠️ Batch scheduler auto-check running in background.")
 
                 
                 # Information section
