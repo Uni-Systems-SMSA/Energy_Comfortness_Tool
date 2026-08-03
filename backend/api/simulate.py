@@ -124,7 +124,7 @@ async def submit_simulation(request: SimulateRequest) -> JobSubmissionResponse:
 
         return JobSubmissionResponse(
             job_id=job_id,
-            status=JobStatus.PENDING,
+            status=JobStatus.QUEUED,
             estimated_wait_time_seconds=estimated_wait_time_seconds
         )
 

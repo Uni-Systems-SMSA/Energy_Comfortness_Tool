@@ -136,7 +136,7 @@ async def submit_prediction(request: PredictRequest) -> JobSubmissionResponse:
 
         return JobSubmissionResponse(
             job_id=job_id,
-            status=JobStatus.PENDING,
+            status=JobStatus.QUEUED,
             estimated_wait_time_seconds=estimated_wait_time_seconds
         )
 

@@ -9,10 +9,11 @@ from datetime import datetime
 
 class JobStatus(str, Enum):
     """Job status enumeration."""
-    PENDING = "pending"
+    QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class PredictRequest(BaseModel):
@@ -47,15 +48,17 @@ class JobStatusResponse(BaseModel):
     job_id: str = Field(..., description="Unique job identifier")
     status: JobStatus = Field(..., description="Current job status")
     progress: int = Field(default=0, description="Progress percentage (0-100)")
+    error_message: Optional[str] = Field(None, description="Error message if job failed")
     created_at: datetime = Field(..., description="Job creation timestamp")
-    updated_at: datetime = Field(..., description="Last update timestamp")
+    started_at: Optional[datetime] = Field(None, description="Job start timestamp")
+    completed_at: Optional[datetime] = Field(None, description="Job completion timestamp")
+    result_url: Optional[str] = Field(None, description="URL to retrieve results if job completed")
 
 
 class JobResultsResponse(BaseModel):
     """Response model for job results."""
     job_id: str = Field(..., description="Unique job identifier")
     status: JobStatus = Field(..., description="Final job status")
-    results: Optional[Dict[str, Any]] = Field(None, description="Job results")
-    error_message: Optional[str] = Field(None, description="Error message if job failed")
+    data: Optional[Dict[str, Any]] = Field(None, description="Job results data")
     created_at: datetime = Field(..., description="Job creation timestamp")
     completed_at: Optional[datetime] = Field(None, description="Job completion timestamp")
