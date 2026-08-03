@@ -36,11 +36,10 @@ async def health_check():
     )
 
 
-# Placeholder routers (to be implemented in subsequent tasks)
-# from backend.routers import predict_router, simulate_router, jobs_router
-# app.include_router(predict_router.router, prefix="/api/v1/predict", tags=["predict"])
-# app.include_router(simulate_router.router, prefix="/api/v1/simulate", tags=["simulate"])
-# app.include_router(jobs_router.router, prefix="/api/v1/jobs", tags=["jobs"])
+# Include routers for various endpoints
+from backend.api import predict
+
+app.include_router(predict.router, prefix="/api/v1", tags=["predict"])
 
 
 if __name__ == "__main__":
