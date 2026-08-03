@@ -37,9 +37,10 @@ async def health_check():
 
 
 # Include routers for various endpoints
-from backend.api import predict
+from backend.api import predict, simulate
 
 app.include_router(predict.router, prefix="/api/v1", tags=["predict"])
+app.include_router(simulate.router, prefix="/api/v1", tags=["simulate"])
 
 
 if __name__ == "__main__":

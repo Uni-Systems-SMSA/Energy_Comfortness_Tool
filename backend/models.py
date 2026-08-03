@@ -29,10 +29,10 @@ class SimulateRequest(BaseModel):
     """Request model for simulation jobs."""
     model_config = ConfigDict(protected_namespaces=())
 
-    space_id: str = Field(..., description="Identifier for the space")
-    parameters: Dict[str, Any] = Field(..., description="Simulation parameters")
-    duration: int = Field(..., description="Simulation duration in minutes")
-    model_version: Optional[str] = Field(None, description="Model version to use")
+    building_id: str = Field(..., description="Identifier for the building")
+    ifc_file_id: str = Field(..., description="Identifier for the IFC file")
+    weather_data_id: str = Field(..., description="Identifier for the weather data")
+    parameters: Optional[Dict[str, Any]] = Field(None, description="Simulation parameters")
 
 
 class JobSubmissionResponse(BaseModel):
