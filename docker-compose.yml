@@ -1,17 +1,84 @@
 services:
-  database:
-    image: postgres:17.0
-    container_name: ect_db
-    restart: unless-stopped
-    env_file:
-      - ".env"
-    volumes:
-      - ./database/data:/var/lib/postgresql/data
-      # - ./database/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
-
-    hostname: localhost
+  postgres:
+    image: postgres:15-alpine
+    container_name: ect_postgres
+    environment:
+      POSTGRES_USER: ect_user
+      POSTGRES_PASSWORD: ect_password
+      POSTGRES_DB: ect_db
     ports:
-      - "5442:5432"
+      - "5432:5432"
+    volumes:
+      - ect_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ect_user -d ect_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ect_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: ect_backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://ect_user:ect_password@postgres:5432/ect_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: ect_worker
+    environment:
+      DATABASE_URL: postgresql://ect_user:ect_password@postgres:5432/ect_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ect_streamlit
+    ports:
+      - "8501:8501"
+    environment:
+      FASTAPI_URL: http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
 
 volumes:
   ect_pgdata:
