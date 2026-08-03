@@ -5,7 +5,7 @@ from __future__ import annotations
 # versioning
 from __version__ import __version__ as _VERSION
 
-import os, sys, math, logging, importlib.util, shutil
+import os, sys, math, logging, importlib.util, shutil, time
 from pathlib import Path
 from datetime import datetime, timedelta, date, timezone
 from typing import Optional
@@ -38,6 +38,15 @@ from ece.feature_map import MAP as FEATURE_MAP, TIME_DRIVERS
 from ece.weather_api import fetch_open_meteo
 from ece.pipeline_weather import generate_epw_for_location  # type: ignore
 from ece.pipeline_eplus_wrapper import run_eplus_simulation_async, test_bim2sim_environment, run_user_request  # type: ignore
+
+# Import APIClient for FastAPI backend communication
+try:
+    from api_client import APIClient
+    HAS_API_CLIENT = True
+except ImportError:
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.warning("APIClient not available, will fall back to direct ECE calls")
+    HAS_API_CLIENT = False
 
 
 def _convert_decimal_to_float(value):
@@ -2094,6 +2103,154 @@ from ece.helpers import (                                   # noqa: E402
 # ------------------- project logger -------------------
 from ece.utils.logging import get_logger
 logger = get_logger(__name__)
+
+
+# ------------------- API Integration Wrappers -------------------
+def _submit_simulation_job(
+    building_id: str,
+    ifc_file_id: str,
+    weather_data_id: str,
+    parameters: Optional[dict] = None
+) -> Optional[str]:
+    """
+    Submit an energy simulation job to the FastAPI backend.
+
+    Args:
+        building_id: Identifier for the building
+        ifc_file_id: Identifier for the IFC file
+        weather_data_id: Identifier for the weather data
+        parameters: Optional simulation parameters
+
+    Returns:
+        job_id if successful, None if failed or API not available
+    """
+    if not HAS_API_CLIENT:
+        logger.warning("APIClient not available, cannot submit job via API")
+        return None
+
+    try:
+        client = APIClient()
+        job_id = client.submit_simulation(
+            building_id=building_id,
+            ifc_file_id=ifc_file_id,
+            weather_data_id=weather_data_id,
+            parameters=parameters or {}
+        )
+        logger.info(f"Simulation job submitted successfully: {job_id}")
+        return job_id
+    except Exception as e:
+        logger.error(f"Failed to submit simulation job: {e}")
+        return None
+
+
+def _poll_job_status(
+    job_id: str,
+    progress_bar,
+    status_text,
+    timeout_seconds: int = 600
+) -> Optional[dict]:
+    """
+    Poll job status with progress bar updates until completion.
+
+    Args:
+        job_id: The job ID to poll
+        progress_bar: Streamlit progress bar widget
+        status_text: Streamlit text widget for status updates
+        timeout_seconds: Maximum polling duration (default 10 minutes)
+
+    Returns:
+        Job status dict if completed, None if failed or timed out
+    """
+    if not HAS_API_CLIENT:
+        logger.warning("APIClient not available, cannot poll job status")
+        return None
+
+    try:
+        client = APIClient()
+        start_time = time.time()
+        poll_count = 0
+
+        while time.time() - start_time < timeout_seconds:
+            try:
+                job_status = client.get_job_status(job_id)
+                poll_count += 1
+
+                logger.debug(f"Poll #{poll_count} - Job {job_id}: {job_status.status} ({job_status.progress}%)")
+
+                # Update progress bar and status text
+                progress_value = min(job_status.progress / 100.0, 0.99)  # Cap at 99% until complete
+                progress_bar.progress(progress_value)
+
+                status_msg = f"⏳ Processing... ({job_status.progress}%)"
+                if job_status.status == "running":
+                    status_msg = f"🔄 Simulation running... ({job_status.progress}%)"
+                elif job_status.status == "queued":
+                    status_msg = f"📋 Queued... ({job_status.progress}%)"
+
+                status_text.text(status_msg)
+
+                # Check if completed
+                if job_status.status == "completed":
+                    logger.info(f"Job {job_id} completed successfully")
+                    progress_bar.progress(1.0)
+                    status_text.text("✅ Simulation completed!")
+                    return {
+                        "job_id": job_id,
+                        "status": job_status.status,
+                        "progress": job_status.progress,
+                        "result_url": job_status.result_url
+                    }
+
+                # Check if failed
+                if job_status.status == "failed":
+                    error_msg = job_status.error_message or "Unknown error"
+                    logger.error(f"Job {job_id} failed: {error_msg}")
+                    status_text.text(f"❌ Simulation failed: {error_msg}")
+                    return None
+
+                # Sleep before next poll
+                time.sleep(2)
+
+            except Exception as e:
+                logger.error(f"Error polling job status: {e}")
+                status_text.text(f"⚠️ Error checking status: {str(e)}")
+                time.sleep(2)
+                continue
+
+        # Timeout reached
+        logger.error(f"Job polling timeout after {timeout_seconds} seconds")
+        status_text.text(f"⏱️ Polling timeout after {timeout_seconds}s")
+        return None
+
+    except Exception as e:
+        logger.error(f"Fatal error in polling loop: {e}")
+        status_text.text(f"❌ Fatal error: {str(e)}")
+        return None
+
+
+def _handle_completed_job(job_id: str) -> Optional[dict]:
+    """
+    Retrieve and process completed job results.
+
+    Args:
+        job_id: The completed job ID
+
+    Returns:
+        Results dictionary if successful, None if failed
+    """
+    if not HAS_API_CLIENT:
+        logger.warning("APIClient not available, cannot retrieve job results")
+        return None
+
+    try:
+        client = APIClient()
+        results = client.get_job_results(job_id)
+        logger.info(f"Successfully retrieved results for job {job_id}")
+        return results
+    except Exception as e:
+        logger.error(f"Failed to retrieve job results: {e}")
+        return None
+
 
 # --------------------- FILE LOCATIONS -------------------------
 LOGO      = Path("./dashboard/assets/images/logo.png")
@@ -4745,26 +4902,82 @@ if st.session_state.get("predicted"):
                             ifc_path = Path(latest_ifc_path)
                             logger.info(f"Using IFC file: {ifc_path}")
                             
-                            # Step 3: Run EnergyPlus simulation
+                            # Step 3: Run EnergyPlus simulation via API or direct call
                             logger.info("Step 3: Running EnergyPlus simulation")
                             status_text.text("🏃‍♂️ Running EnergyPlus simulation...")
                             progress_bar.progress(75)
-                            
-                            from ece.pipeline_eplus_wrapper import run_user_request
-                            simulation_results = run_user_request(
-                                ifc_file_path=ifc_path,
-                                weather_file_path=epw_path,
-                                sensor_id=target_sensor,  # Fixed: parameter name should be sensor_id
-                                start_date=start_datetime.strftime('%Y-%m-%d'),
-                                end_date=end_datetime.strftime('%Y-%m-%d'),
-                                project_base_dir=Path("./eplus_sim")
-                            )
-                            
+
+                            simulation_results = None
+
+                            # Try API-based submission first
+                            if HAS_API_CLIENT:
+                                try:
+                                    logger.info("Attempting API-based simulation job submission")
+                                    building_id = st.session_state.get('current_building_id', f"building_{target_sensor}")
+
+                                    # Submit job via API
+                                    job_id = _submit_simulation_job(
+                                        building_id=building_id,
+                                        ifc_file_id=str(ifc_path),
+                                        weather_data_id=str(epw_path),
+                                        parameters={
+                                            "sensor_id": target_sensor,
+                                            "start_date": start_datetime.strftime('%Y-%m-%d'),
+                                            "end_date": end_datetime.strftime('%Y-%m-%d'),
+                                            "project_base_dir": "./eplus_sim"
+                                        }
+                                    )
+
+                                    if job_id:
+                                        logger.info(f"Simulation job submitted: {job_id}")
+                                        status_text.text("⏳ Waiting for simulation to start...")
+                                        progress_bar.progress(80)
+
+                                        # Poll job status until completion (10 minute timeout)
+                                        job_result = _poll_job_status(job_id, progress_bar, status_text, timeout_seconds=600)
+
+                                        if job_result and job_result.get("status") == "completed":
+                                            # Retrieve results from API
+                                            api_results = _handle_completed_job(job_id)
+                                            if api_results:
+                                                simulation_results = api_results
+                                                # Ensure success flag is set
+                                                if "success" not in simulation_results:
+                                                    simulation_results["success"] = True
+                                                logger.info("Successfully retrieved results from API")
+                                        else:
+                                            logger.warning("Job did not complete successfully or polling timed out")
+                                            simulation_results = {"success": False, "error": "Job polling failed or timed out"}
+                                    else:
+                                        logger.warning("Failed to submit job via API, will fall back to direct call")
+                                        simulation_results = None
+
+                                except Exception as e:
+                                    logger.error(f"API-based simulation failed: {e}", exc_info=True)
+                                    logger.info("Falling back to direct ECE pipeline call")
+                                    simulation_results = None
+
+                            # Fall back to direct call if API not available or failed
+                            if simulation_results is None:
+                                logger.info("Using direct ECE pipeline call for simulation")
+                                status_text.text("🏃‍♂️ Running EnergyPlus simulation (direct mode)...")
+                                progress_bar.progress(75)
+
+                                from ece.pipeline_eplus_wrapper import run_user_request
+                                simulation_results = run_user_request(
+                                    ifc_file_path=ifc_path,
+                                    weather_file_path=epw_path,
+                                    sensor_id=target_sensor,
+                                    start_date=start_datetime.strftime('%Y-%m-%d'),
+                                    end_date=end_datetime.strftime('%Y-%m-%d'),
+                                    project_base_dir=Path("./eplus_sim")
+                                )
+
                             # Step 4: Store results
                             logger.info("Step 4: Storing simulation results")
                             status_text.text("💾 Storing simulation results...")
                             progress_bar.progress(90)
-                            
+
                             if simulation_results.get("success", False):
                                 storage_success = _store_energy_simulation_results(
                                     simulation_results, target_sensor, str(ifc_path), str(epw_path)
