@@ -73,7 +73,7 @@ async def get_status(job_id: str) -> JobStatusResponse:
 
         # Add result_url if job is completed
         if job_status == JobStatus.COMPLETED:
-            response_data["result_url"] = f"/api/results/{job_id}"
+            response_data["result_url"] = f"/api/v1/results/{job_id}"
 
         logger.info(f"Successfully retrieved status for job {job_id}: {job_status}")
         return JobStatusResponse(**response_data)

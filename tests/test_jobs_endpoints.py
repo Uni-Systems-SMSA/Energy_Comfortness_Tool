@@ -104,7 +104,7 @@ class TestGetStatus:
             assert data["status"] == "completed"
             assert data["progress"] == 100
             assert "result_url" in data
-            assert data["result_url"] == "/api/results/test-job-003"
+            assert data["result_url"] == "/api/v1/results/test-job-003"
 
     def test_get_status_job_not_found(self, client):
         """Test getting status of non-existent job returns 404."""
