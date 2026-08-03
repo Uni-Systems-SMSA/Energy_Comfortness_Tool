@@ -3,7 +3,7 @@ Pydantic models for request/response validation.
 """
 from enum import Enum
 from typing import Optional, Any, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 
 
@@ -17,13 +17,18 @@ class JobStatus(str, Enum):
 
 class PredictRequest(BaseModel):
     """Request model for prediction jobs."""
+    model_config = ConfigDict(protected_namespaces=())
+
+    building_id: str = Field(..., description="Identifier for the building")
     space_id: str = Field(..., description="Identifier for the space")
-    features: Dict[str, Any] = Field(..., description="Feature dictionary for prediction")
-    model_version: Optional[str] = Field(None, description="Model version to use")
+    date_range: Dict[str, str] = Field(..., description="Date range with 'start' and 'end' keys (ISO format)")
+    model_type: str = Field(..., description="Type of model to use for prediction")
 
 
 class SimulateRequest(BaseModel):
     """Request model for simulation jobs."""
+    model_config = ConfigDict(protected_namespaces=())
+
     space_id: str = Field(..., description="Identifier for the space")
     parameters: Dict[str, Any] = Field(..., description="Simulation parameters")
     duration: int = Field(..., description="Simulation duration in minutes")
@@ -34,7 +39,7 @@ class JobSubmissionResponse(BaseModel):
     """Response model for job submission."""
     job_id: str = Field(..., description="Unique job identifier")
     status: JobStatus = Field(..., description="Initial job status")
-    message: str = Field(..., description="Human-readable message")
+    estimated_wait_time_seconds: Optional[int] = Field(None, description="Estimated wait time in seconds for job completion")
 
 
 class JobStatusResponse(BaseModel):

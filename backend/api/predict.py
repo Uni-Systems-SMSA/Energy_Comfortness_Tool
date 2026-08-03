@@ -44,35 +44,54 @@ async def submit_prediction(request: PredictRequest) -> JobSubmissionResponse:
     creates a job record in the database, and queues it to Celery.
 
     Args:
-        request: PredictRequest with space_id, features, and optional model_version
+        request: PredictRequest with building_id, space_id, date_range, and model_type
 
     Returns:
-        JobSubmissionResponse with job_id, status, and message
+        JobSubmissionResponse with job_id, status, and estimated_wait_time_seconds
 
     Raises:
         HTTPException: If validation fails or job creation fails
     """
     try:
-        logger.info(f"Received prediction request for space {request.space_id}")
+        logger.info(f"Received prediction request for building {request.building_id}, space {request.space_id}")
 
         # Validate input
+        if not request.building_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="building_id is required"
+            )
+
         if not request.space_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="space_id is required"
             )
 
-        if not request.features or not isinstance(request.features, dict):
+        if not request.date_range or not isinstance(request.date_range, dict):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="features must be a non-empty dictionary"
+                detail="date_range is required and must be a dictionary"
+            )
+
+        if "start" not in request.date_range or "end" not in request.date_range:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="date_range must contain 'start' and 'end' keys"
+            )
+
+        if not request.model_type:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="model_type is required"
             )
 
         # Prepare input parameters for database
         input_params = {
+            "building_id": request.building_id,
             "space_id": request.space_id,
-            "features": request.features,
-            "model_version": request.model_version,
+            "date_range": request.date_range,
+            "model_type": request.model_type,
         }
 
         # Create job record in database
@@ -93,7 +112,7 @@ async def submit_prediction(request: PredictRequest) -> JobSubmissionResponse:
         # Queue task to Celery
         try:
             task = predict_task.apply_async(
-                args=[job_id, request.space_id, request.features, request.model_version],
+                args=[job_id, request.building_id, request.space_id, request.date_range, request.model_type],
                 task_id=job_id,
                 priority=PREDICT_TASK_PRIORITY,
                 timeout=PREDICT_TASK_TIMEOUT,
@@ -118,7 +137,7 @@ async def submit_prediction(request: PredictRequest) -> JobSubmissionResponse:
         return JobSubmissionResponse(
             job_id=job_id,
             status=JobStatus.PENDING,
-            message=f"Prediction job {job_id} submitted successfully"
+            estimated_wait_time_seconds=estimated_wait_time_seconds
         )
 
     except ValidationError as e:
@@ -147,9 +166,10 @@ async def submit_prediction(request: PredictRequest) -> JobSubmissionResponse:
 def predict_task(
     self,
     job_id: str,
+    building_id: str,
     space_id: str,
-    features: dict,
-    model_version: Optional[str] = None
+    date_range: dict,
+    model_type: str
 ) -> dict:
     """
     Celery task for async ML prediction.
@@ -164,9 +184,10 @@ def predict_task(
     Args:
         self: Celery task context (for retry)
         job_id: Unique job identifier
+        building_id: Building identifier for prediction
         space_id: Space identifier for prediction
-        features: Feature dictionary for prediction
-        model_version: Optional model version to use
+        date_range: Date range dictionary with 'start' and 'end' keys
+        model_type: Type of model to use for prediction
 
     Returns:
         Dictionary with prediction results
@@ -175,7 +196,7 @@ def predict_task(
         Exception: If prediction fails (will trigger retry)
     """
     try:
-        logger.info(f"Starting prediction task {job_id} for space {space_id}")
+        logger.info(f"Starting prediction task {job_id} for building {building_id}, space {space_id}, model {model_type}")
 
         # Update job status to "running"
         update_job_status(
@@ -188,17 +209,20 @@ def predict_task(
         # When ece.pipeline_ml module is available, uncomment:
         # from ece.pipeline_ml import predict
         # predictions = predict(
+        #     building_id=building_id,
         #     space_id=space_id,
-        #     features=features,
-        #     model_version=model_version
+        #     date_range=date_range,
+        #     model_type=model_type
         # )
 
         # For now, mock prediction results
-        logger.info("Calling ECE pipeline for predictions (currently mocked)")
+        logger.info(f"Calling ECE pipeline for predictions (currently mocked) for {building_id}/{space_id}")
         predictions = {
+            "building_id": building_id,
             "space_id": space_id,
-            "model_version": model_version or "default",
-            "predictions": features,  # Mock: echo back features as predictions
+            "date_range": date_range,
+            "model_type": model_type,
+            "predictions": {"status": "mocked"},  # Mock: placeholder predictions
             "timestamp": datetime.utcnow().isoformat(),
         }
 
