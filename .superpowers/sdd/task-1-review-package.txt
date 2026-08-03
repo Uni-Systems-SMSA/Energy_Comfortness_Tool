@@ -1,0 +1,211 @@
+ backend/__init__.py |  0
+ backend/config.py   | 46 +++++++++++++++++++++++++++++++++++++++++++
+ backend/main.py     | 53 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ backend/models.py   | 56 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ requirements.txt    | 10 ++++++++++
+ 5 files changed, 165 insertions(+)
+--- COMMIT LOG ---
+f348b3c feat: scaffold FastAPI backend with configuration and models
+
+--- FULL DIFF ---
+diff --git a/backend/__init__.py b/backend/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/backend/config.py b/backend/config.py
+new file mode 100644
+index 0000000..eeb49b3
+--- /dev/null
++++ b/backend/config.py
+@@ -0,0 +1,46 @@
++"""
++FastAPI backend configuration.
++
++Reads from environment variables using python-dotenv.
++"""
++import os
++from dotenv import load_dotenv
++
++# Load environment variables from .env file
++load_dotenv()
++
++
++class Settings:
++    """Application settings."""
++
++    # Database configuration
++    DATABASE_URL: str = os.getenv(
++        "DATABASE_URL",
++        "postgresql://user:password@localhost:5432/ece_db"
++    )
++
++    # Redis configuration
++    REDIS_URL: str = os.getenv(
++        "REDIS_URL",
++        "redis://localhost:6379/0"
++    )
++
++    # Job configuration
++    JOB_TIMEOUT: int = 3600  # 1 hour in seconds
++
++    # API configuration
++    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
++    API_PORT: int = int(os.getenv("API_PORT", "8000"))
++
++    # Celery configuration
++    CELERY_BROKER_URL: str = os.getenv(
++        "CELERY_BROKER_URL",
++        REDIS_URL
++    )
++    CELERY_RESULT_BACKEND: str = os.getenv(
++        "CELERY_RESULT_BACKEND",
++        REDIS_URL
++    )
++
++
++settings = Settings()
+diff --git a/backend/main.py b/backend/main.py
+new file mode 100644
+index 0000000..a2970c3
+--- /dev/null
++++ b/backend/main.py
+@@ -0,0 +1,53 @@
++"""
++FastAPI backend application.
++
++Serves as the main entry point for the ECE scalability refactor backend.
++Handles prediction and simulation job submissions with asynchronous processing.
++"""
++from fastapi import FastAPI
++from fastapi.middleware.cors import CORSMiddleware
++from fastapi.responses import JSONResponse
++
++from backend.config import settings
++
++# Initialize FastAPI app
++app = FastAPI(
++    title="ECE Backend API",
++    description="Backend API for Energy Comfort Estimation",
++    version="0.1.0"
++)
++
++# Configure CORS middleware to allow all origins for Streamlit frontend
++app.add_middleware(
++    CORSMiddleware,
++    allow_origins=["*"],
++    allow_credentials=True,
++    allow_methods=["*"],
++    allow_headers=["*"],
++)
++
++
++@app.get("/health", tags=["health"])
++async def health_check():
++    """Health check endpoint."""
++    return JSONResponse(
++        status_code=200,
++        content={"status": "healthy"}
++    )
++
++
++# Placeholder routers (to be implemented in subsequent tasks)
++# from backend.routers import predict_router, simulate_router, jobs_router
++# app.include_router(predict_router.router, prefix="/api/v1/predict", tags=["predict"])
++# app.include_router(simulate_router.router, prefix="/api/v1/simulate", tags=["simulate"])
++# app.include_router(jobs_router.router, prefix="/api/v1/jobs", tags=["jobs"])
++
++
++if __name__ == "__main__":
++    import uvicorn
++    uvicorn.run(
++        "backend.main:app",
++        host=settings.API_HOST,
++        port=settings.API_PORT,
++        reload=True
++    )
+diff --git a/backend/models.py b/backend/models.py
+new file mode 100644
+index 0000000..69cbd35
+--- /dev/null
++++ b/backend/models.py
+@@ -0,0 +1,56 @@
++"""
++Pydantic models for request/response validation.
++"""
++from enum import Enum
++from typing import Optional, Any, Dict
++from pydantic import BaseModel, Field
++from datetime import datetime
++
++
++class JobStatus(str, Enum):
++    """Job status enumeration."""
++    PENDING = "pending"
++    RUNNING = "running"
++    COMPLETED = "completed"
++    FAILED = "failed"
++
++
++class PredictRequest(BaseModel):
++    """Request model for prediction jobs."""
++    space_id: str = Field(..., description="Identifier for the space")
++    features: Dict[str, Any] = Field(..., description="Feature dictionary for prediction")
++    model_version: Optional[str] = Field(None, description="Model version to use")
++
++
++class SimulateRequest(BaseModel):
++    """Request model for simulation jobs."""
++    space_id: str = Field(..., description="Identifier for the space")
++    parameters: Dict[str, Any] = Field(..., description="Simulation parameters")
++    duration: int = Field(..., description="Simulation duration in minutes")
++    model_version: Optional[str] = Field(None, description="Model version to use")
++
++
++class JobSubmissionResponse(BaseModel):
++    """Response model for job submission."""
++    job_id: str = Field(..., description="Unique job identifier")
++    status: JobStatus = Field(..., description="Initial job status")
++    message: str = Field(..., description="Human-readable message")
++
++
++class JobStatusResponse(BaseModel):
++    """Response model for job status query."""
++    job_id: str = Field(..., description="Unique job identifier")
++    status: JobStatus = Field(..., description="Current job status")
++    progress: int = Field(default=0, description="Progress percentage (0-100)")
++    created_at: datetime = Field(..., description="Job creation timestamp")
++    updated_at: datetime = Field(..., description="Last update timestamp")
++
++
++class JobResultsResponse(BaseModel):
++    """Response model for job results."""
++    job_id: str = Field(..., description="Unique job identifier")
++    status: JobStatus = Field(..., description="Final job status")
++    results: Optional[Dict[str, Any]] = Field(None, description="Job results")
++    error_message: Optional[str] = Field(None, description="Error message if job failed")
++    created_at: datetime = Field(..., description="Job creation timestamp")
++    completed_at: Optional[datetime] = Field(None, description="Job completion timestamp")
+diff --git a/requirements.txt b/requirements.txt
+index 18e5b49..32d35b6 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -43,10 +43,20 @@ shap>=0.45
+ ipython
+ geopy           # for reverse geocoding lat/lon to location info
+ 
+ 
+ 
+ # ---------- database ----------────
+ sqlalchemy>=2.0
+ psycopg2-binary
+ python-dotenv
+ PyYAML>=6.0
++
++# ---------- FastAPI backend ----------────
++fastapi==0.104.1
++uvicorn==0.24.0
++pydantic==2.5.0
++pydantic-core==2.14.0
++sqlalchemy==2.0.23
++celery==5.3.4
++redis==5.0.1
++python-dotenv==1.0.0

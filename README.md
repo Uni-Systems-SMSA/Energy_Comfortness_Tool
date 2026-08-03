@@ -43,6 +43,8 @@ A comprehensive web-based tool for **indoor environmental quality (IEQ) predicti
 
 ## 🏗️ Architecture Overview
 
+### High-Level System Architecture
+
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   Web Dashboard │    │  ML Engine      │    │ Energy Simulator│
@@ -61,6 +63,53 @@ A comprehensive web-based tool for **indoor environmental quality (IEQ) predicti
                     │   Database      │
                     └─────────────────┘
 ```
+
+### Scalable Backend Architecture (v0.0.9+)
+
+The system now includes a scalable async backend for handling concurrent prediction and simulation jobs:
+
+```
+┌──────────────┐
+│   Client     │
+│   (API/UI)   │
+└──────┬───────┘
+       │
+       ▼
+┌──────────────────────┐
+│   FastAPI Backend    │ ◄─── Job submission
+│   (REST API)         │      Status tracking
+│   1-N replicas       │      Result retrieval
+└──────┬───────────────┘
+       │
+       ├─────────────────────┬──────────────────────┤
+       ▼                     ▼                      ▼
+┌──────────────┐      ┌──────────────┐      ┌────────────────┐
+│   Redis      │      │  PostgreSQL  │      │  Celery Queue  │
+│   Broker     │◄────►│   Database   │◄────►│   (Redis-based)│
+└──────────────┘      └──────────────┘      └────────┬───────┘
+                                                     │
+                                        ┌────────────┴────────────┐
+                                        ▼                         ▼
+                              ┌──────────────────┐    ┌──────────────────┐
+                              │ Celery Workers   │    │ Celery Workers   │
+                              │ (Prediction)     │    │ (Simulation)     │
+                              │ 1-N instances    │    │ 1-N instances    │
+                              └──────────────────┘    └──────────────────┘
+```
+
+**Key Components:**
+- **FastAPI Backend**: REST API endpoints for job management (predict, simulate, status, cancel, results)
+- **Celery Workers**: Distributed task processing for ML predictions and EnergyPlus simulations
+- **Redis**: Message broker for task queue and result caching
+- **PostgreSQL**: Persistent storage for job metadata and results
+- **Dashboard**: Streamlit web interface for user interaction
+
+**Deployment Options:**
+- **Local Development**: Docker Compose with single API, worker, and database
+- **Single Machine**: Supervisor-managed services with Nginx reverse proxy
+- **Kubernetes**: Multi-replica deployments with auto-scaling
+
+See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed deployment instructions.
 
 ## 🚀 Quick Start
 

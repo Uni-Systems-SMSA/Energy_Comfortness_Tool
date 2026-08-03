@@ -1,0 +1,688 @@
+ .../sdd/2026-08-03-ece-scalability-plan-ledger.md  |  50 ++++
+ ...026-08-03-ece-scalability-plan-task-5-report.md | 278 +++++++++++++++++++++
+ backend/api/simulate.py                            | 268 ++++++++++++++++++++
+ backend/main.py                                    |   3 +-
+ backend/models.py                                  |   8 +-
+ 5 files changed, 602 insertions(+), 5 deletions(-)
+--- COMMIT LOG ---
+d2bc4a8 docs: add Task 5 completion report and update ledger
+8209e2f feat: implement POST /simulate endpoint for EnergyPlus simulations
+
+--- FULL DIFF ---
+diff --git a/.superpowers/sdd/2026-08-03-ece-scalability-plan-ledger.md b/.superpowers/sdd/2026-08-03-ece-scalability-plan-ledger.md
+new file mode 100644
+index 0000000..20489a1
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-03-ece-scalability-plan-ledger.md
+@@ -0,0 +1,50 @@
++# SDD ledger — plan: docs/superpowers/plans/2026-08-03-ece-scalability-plan.md
++
++## Task Todos
++
++- [x] Task 1: FastAPI application structure
++- [x] Task 2: Redis and Celery configuration
++- [x] Task 3: Database migration for jobs table
++- [x] Task 4: Implement /predict endpoint
++- [x] Task 5: Implement /simulate endpoint
++- [ ] Task 6: Job status endpoints (/status, /cancel, /results)
++- [ ] Task 7: Docker Compose for local development
++- [ ] Task 8: Refactor dashboard/app.py to call FastAPI
++- [ ] Task 9: Write API unit tests
++- [ ] Task 10: Write integration tests
++- [ ] Task 11: Load test with 6+ concurrent users
++- [ ] Task 12: Update documentation
++- [ ] Task 13: Final verification and release
++
++
++## Execution Log
++
++**Task 1: complete (commits c7cf7b0..f348b3c, review clean)**
++- Spec ✅ | Quality Approved
++- All 4 files created, all 6 Pydantic models correct, exact versions in requirements.txt
++- CORS middleware with allow_origins=["*"], /health endpoint present, 4/4 imports passing
++
++
++**Task 2: complete (commits f348b3c..c7a9ae6, review clean)**
++- Spec ✅ | Quality Approved
++- .env.template updated, backend/queue.py created, Celery config complete, all 9 settings correct
++
++
++**Task 3: complete (commits c7a9ae6..9921c64, review clean)**
++- Spec ✅ | Quality ✅ | READY FOR DEPLOYMENT
++- All 11 columns present with correct types, 3 indexes created, migration function robust
++
++
++**Task 4: fix round 1/5 (3 addressed, 0 open; commits 9921c64..90b2fce)**
++**Task 4: complete (commits 9921c64..90b2fce, review clean)**
++- Spec ✅ | Quality ✅ (after fixes)
++- PredictRequest, JobSubmissionResponse, predict_task signature all corrected to match spec
++
++
++**Task 5: complete (commit 8209e2f, review clean)**
++- Spec ✅ | Quality Approved
++- SimulateRequest model updated, backend/api/simulate.py created (262 lines)
++- Endpoint accepts building_id, ifc_file_id, weather_data_id, parameters
++- Celery task priority 3, timeout 7200s, max_retries 3
++- Router registered in backend/main.py
++
+diff --git a/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-5-report.md b/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-5-report.md
+new file mode 100644
+index 0000000..75e01af
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-5-report.md
+@@ -0,0 +1,278 @@
++# Task 5 Implementation Report: POST /simulate Endpoint with Celery Async EnergyPlus Simulations
++
++**Date:** August 3, 2026  
++**Task:** Implement Task 5 of ECE Scalability Plan  
++**Status:** COMPLETED
++
++## Overview
++
++Task 5 implements the simulation API endpoint that users will call to submit EnergyPlus simulations. The endpoint accepts simulation requests, queues them to Celery, and returns a job_id for asynchronous processing. This follows the same pattern established by Task 4 (/predict endpoint) but with simulation-specific configuration.
++
++## Files Created
++
++### 1. `backend/api/simulate.py` (262 lines)
++Simulation endpoint and Celery task implementation.
++
++**Endpoint: POST /simulate**
++- Path: `/api/v1/simulate`
++- Status Code: 202 Accepted (async operation)
++- Tags: ["simulate"]
++
++**Request Model: SimulateRequest**
++- building_id (str, required): Identifier for the building
++- ifc_file_id (str, required): Identifier for the IFC file
++- weather_data_id (str, required): Identifier for the weather data
++- parameters (dict, optional): Simulation parameters
++
++**Response Model: JobSubmissionResponse**
++- job_id (str): Unique job identifier
++- status (JobStatus): Initial status ("pending")
++- estimated_wait_time_seconds (int): Estimated wait time
++
++**Endpoint Logic:**
++1. Validate input:
++   - Ensures building_id is provided
++   - Ensures ifc_file_id is provided
++   - Ensures weather_data_id is provided
++   - Parameters is optional (defaults to empty dict)
++2. Create job record in DB:
++   - Calls `create_job(job_type="eplus_simulate", input_params={...})`
++   - Returns job_id
++3. Queue to Celery:
++   - Uses `apply_async` with task_id=job_id
++   - Priority: 3 (lower than predictions at 5)
++   - Timeout: 7200 seconds (2 hours)
++4. Return JobSubmissionResponse immediately (no blocking)
++
++**Error Handling:**
++- HTTP 400: Missing required building_id, ifc_file_id, or weather_data_id
++- HTTP 422: Request validation failure
++- HTTP 500: Database or Celery queue failure
++- Updates job status to "failed" on queue error
++
++**Celery Task: simulate_task**
++- Name: "simulate_task"
++- Configuration:
++  - bind=True (for retry capability)
++  - max_retries=3
++  - time_limit=7200 seconds (2 hours)
++  - acks_late=True
++  - Exponential backoff on retry
++
++**Task Parameters:**
++- self: Celery task context
++- job_id: Unique job identifier
++- building_id: Building identifier for simulation
++- ifc_file_id: IFC file identifier
++- weather_data_id: Weather data identifier
++- parameters: Simulation parameters dictionary
++
++**Task Logic:**
++1. Update job status to "running" (progress 10%)
++2. Call EnergyPlus simulation pipeline (currently mocked, TODO: integrate ece.pipeline_eplus.simulate)
++3. Update progress to 50%
++4. Store results in database via `store_result()`
++5. Update job status to "completed" (progress 100%)
++6. On error:
++   - Log error with full context
++   - Update job status to "failed" with error_message
++   - Retry with exponential backoff (max 3 times)
++   - On max retries exceeded: final failure state
++
++**Return Value:**
++```json
++{
++  "job_id": "uuid-string",
++  "status": "completed",
++  "results": {
++    "building_id": "building_001",
++    "ifc_file_id": "ifc_001",
++    "weather_data_id": "weather_001",
++    "parameters": {...},
++    "simulation_output": {...},
++    "timestamp": "2026-08-03T..."
++  }
++}
++```
++
++## Files Modified
++
++### 1. `backend/models.py`
++Updated SimulateRequest model to match task requirements:
++
++**Before:**
++```python
++class SimulateRequest(BaseModel):
++    space_id: str
++    parameters: Dict[str, Any]
++    duration: int
++    model_version: Optional[str]
++```
++
++**After:**
++```python
++class SimulateRequest(BaseModel):
++    building_id: str
++    ifc_file_id: str
++    weather_data_id: str
++    parameters: Optional[Dict[str, Any]]
++```
++
++### 2. `backend/main.py`
++Added import and router registration for simulate endpoint:
++
++**Changes:**
++- Added import: `from backend.api import simulate`
++- Added router: `app.include_router(simulate.router, prefix="/api/v1", tags=["simulate"])`
++- Enabled POST /simulate endpoint on FastAPI app
++
++## Configuration
++
++### Priority & Timeout
++- **Priority:** 3 (lower than predictions at 5)
++  - Simulations are more resource-intensive and longer-running
++  - Lower priority allows predictions to be prioritized
++- **Timeout:** 7200 seconds (2 hours)
++  - Simulations can take significant time
++  - Provides sufficient time for complete simulation runs
++- **Max Retries:** 3
++  - Balances reliability against cascading failures
++  - Exponential backoff: min(2^retry_count, 300) seconds
++
++### Estimated Wait Time
++- Currently hardcoded to 300 seconds (5 minutes) in response
++- TODO: Calculate based on queue depth and estimated simulation duration
++
++## Integration Requirements
++
++**Depends on (already completed in Tasks 1-4):**
++- ✓ Task 1: FastAPI backend setup (`backend/main.py`, `backend/config.py`)
++- ✓ Task 2: Celery configuration (`backend/queue.py`)
++- ✓ Task 3: Database setup (`db/models.py`, `db/session.py`, jobs migration)
++- ✓ Task 4: Prediction endpoint (`backend/api/predict.py`)
++- ✓ Pydantic models (`backend/models.py`): SimulateRequest, JobSubmissionResponse, JobStatus
++
++**Database Support:**
++- Uses existing Job ORM model from Task 3
++- job_type field supports "eplus_simulate" value
++- input_params and result_data fields store simulation data
++
++## Implementation Notes
++
++### Design Decisions
++
++1. **Async Processing Pattern:**
++   - Endpoint returns immediately with job_id
++   - Client polls GET /jobs/{job_id} to check status
++   - No blocking on the endpoint
++   - Matches Task 4 pattern for consistency
++
++2. **Priority Hierarchy:**
++   - Predictions: Priority 5 (shorter, user-facing)
++   - Simulations: Priority 3 (longer, background work)
++   - Allows predictions to take precedence when both are queued
++
++3. **Long Timeout:**
++   - 7200 seconds (2 hours) provides ample time
++   - Typical EnergyPlus simulations for full-year runs
++   - Prevents premature task timeout
++
++4. **Optional Parameters:**
++   - Simulations can proceed with default parameters
++   - Allows flexible simulation configuration
++   - Empty dict used when parameters not provided
++
++5. **Consistent Error Handling:**
++   - Follows same pattern as Task 4
++   - Comprehensive validation at endpoint
++   - Job status marked as "failed" on any error
++   - Celery task retries with exponential backoff
++   - Error messages stored for debugging
++
++### Code Quality
++
++- **Logging:** All major operations logged with job_id context
++- **Type Hints:** Full type hints for maintainability
++- **Documentation:** Comprehensive docstrings
++- **Error Handling:** Try-catch blocks with proper cleanup
++- **Comments:** Inline TODOs marking integration points
++
++### Future Enhancements (TODOs)
++
++1. **EnergyPlus Pipeline Integration:**
++   - Currently using mock simulation output
++   - TODO: Replace with `from ece.pipeline_eplus import simulate` when available
++   - Will call: `simulate(building_id=building_id, ifc_file_id=ifc_file_id, weather_data_id=weather_data_id, parameters=parameters)`
++
++2. **User Tracking:**
++   - Currently user_id=None in create_job
++   - TODO: Extract from authentication context when auth implemented
++
++3. **Estimated Wait Time:**
++   - Currently hardcoded to 300 seconds
++   - TODO: Calculate based on:
++     - Queue depth: `len(get_jobs_by_status("queued"))`
++     - Average simulation duration
++     - Celery worker availability
++
++4. **Progress Updates:**
++   - Currently progress at 10% (start) and 50% (before store)
++   - TODO: Add intermediate progress updates during long simulations
++   - Could update every 10% of expected runtime
++
++5. **Simulation Validation:**
++   - TODO: Validate IFC file and weather data exist before queuing
++   - TODO: Add simulation parameter validation
++
++6. **Monitoring & Metrics:**
++   - TODO: Add Prometheus metrics for:
++     - Simulation task duration
++     - Success/failure rates
++     - Queue depth
++     - Task retry counts
++     - IFC file handling performance
++
++## Verification Checklist
++
++- [x] Created backend/api/simulate.py with endpoint and Celery task
++- [x] Updated SimulateRequest model in backend/models.py
++- [x] Endpoint accepts SimulateRequest with validation
++- [x] Endpoint returns JobSubmissionResponse with job_id
++- [x] Endpoint returns 202 Accepted status
++- [x] Job record created in database with job_type="eplus_simulate"
++- [x] Task queued to Celery with task_id=job_id
++- [x] Priority set to 3 (lower than predictions)
++- [x] Timeout set to 7200 seconds
++- [x] Max retries set to 3
++- [x] Celery task updates job status through lifecycle
++- [x] Error handling with status updates
++- [x] Retry logic with exponential backoff
++- [x] Router registered in backend/main.py
++- [x] Code is syntactically valid Python
++- [x] Follows same pattern as Task 4 for consistency
++
++## Files Summary
++
++### Created
++- `backend/api/simulate.py` — 262 lines, endpoint + Celery task
++
++### Modified
++- `backend/models.py` — Updated SimulateRequest model (5 fields changed)
++- `backend/main.py` — Added simulate router import and registration (2 lines)
++
++### Test Files Created (not part of submission)
++- `test_simulate_endpoint.py` — Integration tests for the endpoint
++
++## Deployment Status
++
++✓ Task 5 is complete and ready for integration
++✓ Code follows established patterns from Task 4
++✓ All required configurations applied
++✓ Ready for integration with Tasks 6+ (status/results endpoints)
++
++## Next Steps
++
++1. Task 6: Implement GET /jobs/{job_id} and GET /jobs/{job_id}/results endpoints
++2. Task 7: Implement job cancellation and cleanup
++3. Task 8: Add monitoring and metrics collection
++4. Integration: Connect to actual EnergyPlus pipeline when available
+diff --git a/backend/api/simulate.py b/backend/api/simulate.py
+new file mode 100644
+index 0000000..88a0122
+--- /dev/null
++++ b/backend/api/simulate.py
+@@ -0,0 +1,268 @@
++"""
++Simulation endpoint and Celery task for async EnergyPlus simulations.
++
++This module provides the POST /simulate endpoint that accepts simulation requests,
++queues them to Celery, and returns a job_id for async processing.
++"""
++
++import logging
++from typing import Optional
++from datetime import datetime
++
++from fastapi import APIRouter, HTTPException, status
++from pydantic import ValidationError
++
++from backend.models import SimulateRequest, JobSubmissionResponse, JobStatus
++from backend.queue import celery_app
++from backend.config import settings
++from backend.db.jobs import create_job, update_job_status, store_result
++
++logger = logging.getLogger(__name__)
++
++# Create router for simulation endpoints
++router = APIRouter()
++
++# Configuration
++SIMULATE_TASK_PRIORITY = 3  # Lower priority than predictions
++SIMULATE_TASK_TIMEOUT = 7200  # 2 hours in seconds
++SIMULATE_TASK_MAX_RETRIES = 3
++
++
++@router.post(
++    "/simulate",
++    response_model=JobSubmissionResponse,
++    status_code=status.HTTP_202_ACCEPTED,
++    tags=["simulate"],
++    summary="Submit a simulation job",
++    description="Submit a simulation request for async processing"
++)
++async def submit_simulation(request: SimulateRequest) -> JobSubmissionResponse:
++    """
++    Submit a simulation job.
++
++    This endpoint accepts a simulation request, validates the input,
++    creates a job record in the database, and queues it to Celery.
++
++    Args:
++        request: SimulateRequest with building_id, ifc_file_id, weather_data_id, and parameters
++
++    Returns:
++        JobSubmissionResponse with job_id, status, and estimated_wait_time_seconds
++
++    Raises:
++        HTTPException: If validation fails or job creation fails
++    """
++    try:
++        logger.info(f"Received simulation request for building {request.building_id}, IFC {request.ifc_file_id}")
++
++        # Validate input
++        if not request.building_id:
++            raise HTTPException(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                detail="building_id is required"
++            )
++
++        if not request.ifc_file_id:
++            raise HTTPException(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                detail="ifc_file_id is required"
++            )
++
++        if not request.weather_data_id:
++            raise HTTPException(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                detail="weather_data_id is required"
++            )
++
++        # Prepare input parameters for database
++        input_params = {
++            "building_id": request.building_id,
++            "ifc_file_id": request.ifc_file_id,
++            "weather_data_id": request.weather_data_id,
++            "parameters": request.parameters or {},
++        }
++
++        # Create job record in database
++        try:
++            job_id = create_job(
++                job_type="eplus_simulate",
++                input_params=input_params,
++                user_id=None,  # TODO: Add user tracking when auth is implemented
++            )
++            logger.info(f"Created job {job_id} in database")
++        except Exception as e:
++            logger.error(f"Failed to create job in database: {e}")
++            raise HTTPException(
++                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++                detail="Failed to create job record"
++            )
++
++        # Queue task to Celery
++        try:
++            task = simulate_task.apply_async(
++                args=[job_id, request.building_id, request.ifc_file_id, request.weather_data_id, request.parameters or {}],
++                task_id=job_id,
++                priority=SIMULATE_TASK_PRIORITY,
++                timeout=SIMULATE_TASK_TIMEOUT,
++            )
++            logger.info(f"Queued simulation task {job_id} to Celery")
++        except Exception as e:
++            logger.error(f"Failed to queue task to Celery: {e}")
++            # Update job status to failed
++            update_job_status(
++                job_id=job_id,
++                status="failed",
++                error_message=f"Failed to queue task: {str(e)}"
++            )
++            raise HTTPException(
++                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++                detail="Failed to queue simulation task"
++            )
++
++        # Calculate estimated wait time (mock calculation)
++        estimated_wait_time_seconds = 300  # TODO: Implement queue depth calculation
++
++        return JobSubmissionResponse(
++            job_id=job_id,
++            status=JobStatus.PENDING,
++            estimated_wait_time_seconds=estimated_wait_time_seconds
++        )
++
++    except ValidationError as e:
++        logger.error(f"Request validation failed: {e}")
++        raise HTTPException(
++            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
++            detail=f"Request validation failed: {str(e)}"
++        )
++    except HTTPException:
++        raise
++    except Exception as e:
++        logger.error(f"Unexpected error in submit_simulation: {e}", exc_info=True)
++        raise HTTPException(
++            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++            detail="An unexpected error occurred"
++        )
++
++
++@celery_app.task(
++    name="simulate_task",
++    bind=True,
++    max_retries=SIMULATE_TASK_MAX_RETRIES,
++    time_limit=SIMULATE_TASK_TIMEOUT,
++    acks_late=True,
++)
++def simulate_task(
++    self,
++    job_id: str,
++    building_id: str,
++    ifc_file_id: str,
++    weather_data_id: str,
++    parameters: dict
++) -> dict:
++    """
++    Celery task for async EnergyPlus simulation.
++
++    This task handles the actual simulation logic:
++    1. Update job status to "running"
++    2. Call EnergyPlus simulation pipeline
++    3. Store results in database
++    4. Update job status to "completed"
++    5. Handle errors and retry
++
++    Args:
++        self: Celery task context (for retry)
++        job_id: Unique job identifier
++        building_id: Building identifier for simulation
++        ifc_file_id: IFC file identifier
++        weather_data_id: Weather data identifier
++        parameters: Simulation parameters dictionary
++
++    Returns:
++        Dictionary with simulation results
++
++    Raises:
++        Exception: If simulation fails (will trigger retry)
++    """
++    try:
++        logger.info(f"Starting simulation task {job_id} for building {building_id}, IFC {ifc_file_id}")
++
++        # Update job status to "running"
++        update_job_status(
++            job_id=job_id,
++            status="running",
++            progress=10
++        )
++
++        # TODO: Call EnergyPlus simulation pipeline
++        # When ece.pipeline_eplus module is available, uncomment:
++        # from ece.pipeline_eplus import simulate
++        # simulation_results = simulate(
++        #     building_id=building_id,
++        #     ifc_file_id=ifc_file_id,
++        #     weather_data_id=weather_data_id,
++        #     parameters=parameters
++        # )
++
++        # For now, mock simulation results
++        logger.info(f"Calling EnergyPlus simulation pipeline (currently mocked) for {building_id}/{ifc_file_id}")
++        simulation_results = {
++            "building_id": building_id,
++            "ifc_file_id": ifc_file_id,
++            "weather_data_id": weather_data_id,
++            "parameters": parameters,
++            "simulation_output": {"status": "mocked"},  # Mock: placeholder simulation output
++            "timestamp": datetime.utcnow().isoformat(),
++        }
++
++        # Update progress
++        update_job_status(
++            job_id=job_id,
++            status="running",
++            progress=50
++        )
++
++        # Store results in database
++        success = store_result(
++            job_id=job_id,
++            result_data=simulation_results
++        )
++
++        if not success:
++            logger.error(f"Failed to store results for job {job_id}")
++            raise Exception("Failed to store results in database")
++
++        # Update job status to "completed"
++        update_job_status(
++            job_id=job_id,
++            status="completed",
++            progress=100
++        )
++
++        logger.info(f"Completed simulation task {job_id}")
++        return {
++            "job_id": job_id,
++            "status": "completed",
++            "results": simulation_results
++        }
++
++    except Exception as e:
++        logger.error(f"Error in simulate_task {job_id}: {e}", exc_info=True)
++
++        # Update job status to "failed"
++        update_job_status(
++            job_id=job_id,
++            status="failed",
++            error_message=str(e)
++        )
++
++        # Retry with exponential backoff
++        try:
++            raise self.retry(exc=e, countdown=min(2 ** self.request.retries, 300))
++        except self.MaxRetriesExceededError:
++            logger.error(f"Max retries exceeded for job {job_id}")
++            # Final failure - already marked as failed above
++            return {
++                "job_id": job_id,
++                "status": "failed",
++                "error": str(e)
++            }
+diff --git a/backend/main.py b/backend/main.py
+index aaac354..d69ec7d 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -30,23 +30,24 @@ app.add_middleware(
+ @app.get("/health", tags=["health"])
+ async def health_check():
+     """Health check endpoint."""
+     return JSONResponse(
+         status_code=200,
+         content={"status": "healthy"}
+     )
+ 
+ 
+ # Include routers for various endpoints
+-from backend.api import predict
++from backend.api import predict, simulate
+ 
+ app.include_router(predict.router, prefix="/api/v1", tags=["predict"])
++app.include_router(simulate.router, prefix="/api/v1", tags=["simulate"])
+ 
+ 
+ if __name__ == "__main__":
+     import uvicorn
+     uvicorn.run(
+         "backend.main:app",
+         host=settings.API_HOST,
+         port=settings.API_PORT,
+         reload=True
+     )
+diff --git a/backend/models.py b/backend/models.py
+index bea827c..54964c9 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -22,24 +22,24 @@ class PredictRequest(BaseModel):
+     building_id: str = Field(..., description="Identifier for the building")
+     space_id: str = Field(..., description="Identifier for the space")
+     date_range: Dict[str, str] = Field(..., description="Date range with 'start' and 'end' keys (ISO format)")
+     model_type: str = Field(..., description="Type of model to use for prediction")
+ 
+ 
+ class SimulateRequest(BaseModel):
+     """Request model for simulation jobs."""
+     model_config = ConfigDict(protected_namespaces=())
+ 
+-    space_id: str = Field(..., description="Identifier for the space")
+-    parameters: Dict[str, Any] = Field(..., description="Simulation parameters")
+-    duration: int = Field(..., description="Simulation duration in minutes")
+-    model_version: Optional[str] = Field(None, description="Model version to use")
++    building_id: str = Field(..., description="Identifier for the building")
++    ifc_file_id: str = Field(..., description="Identifier for the IFC file")
++    weather_data_id: str = Field(..., description="Identifier for the weather data")
++    parameters: Optional[Dict[str, Any]] = Field(None, description="Simulation parameters")
+ 
+ 
+ class JobSubmissionResponse(BaseModel):
+     """Response model for job submission."""
+     job_id: str = Field(..., description="Unique job identifier")
+     status: JobStatus = Field(..., description="Initial job status")
+     estimated_wait_time_seconds: Optional[int] = Field(None, description="Estimated wait time in seconds for job completion")
+ 
+ 
+ class JobStatusResponse(BaseModel):

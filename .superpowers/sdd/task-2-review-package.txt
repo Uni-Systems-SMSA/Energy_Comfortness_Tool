@@ -1,0 +1,93 @@
+ .env.template    | 18 ++++++++++++++++++
+ backend/queue.py | 56 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 74 insertions(+)
+--- COMMIT LOG ---
+c7a9ae6 feat: Add Redis and Celery configuration for async job processing
+
+--- FULL DIFF ---
+diff --git a/.env.template b/.env.template
+new file mode 100644
+index 0000000..a840d64
+--- /dev/null
++++ b/.env.template
+@@ -0,0 +1,18 @@
++# .env.template - Template for environment variables
++# Copy this to .env and configure with your values
++
++# PostgreSQL Database Configuration
++POSTGRES_USER=ect_admin
++POSTGRES_PASSWORD=ect_pwd
++POSTGRES_DB=ect_db
++POSTGRES_HOST=localhost
++POSTGRES_PORT=5442
++
++# Data Storage
++ECT_DATA_DIR=./model_store
++
++# Redis Configuration
++REDIS_URL=redis://localhost:6379/0
++
++# FastAPI Configuration
++FASTAPI_URL=http://localhost:8000
+diff --git a/backend/queue.py b/backend/queue.py
+new file mode 100644
+index 0000000..edad365
+--- /dev/null
++++ b/backend/queue.py
+@@ -0,0 +1,56 @@
++"""
++Celery app configuration and async task definitions for ECE.
++
++This module sets up the Celery app instance for distributed task processing
++using Redis as the message broker and result backend.
++"""
++
++from celery import Celery
++from backend.config import settings
++
++# Create Celery app instance
++celery_app = Celery(
++    "ece_tasks",
++    broker=settings.CELERY_BROKER_URL,
++    backend=settings.CELERY_RESULT_BACKEND,
++)
++
++# Configure Celery app
++celery_app.conf.update(
++    # Task serialization
++    task_serializer="json",
++    accept_content=["json"],
++
++    # Timezone configuration
++    timezone="UTC",
++    enable_utc=True,
++
++    # Task acknowledgment and prefetching
++    task_acks_late=True,
++    worker_prefetch_multiplier=1,
++
++    # Task timeout configuration (1 hour)
++    task_time_limit=3600,
++    task_soft_time_limit=3600,
++
++    # Broker connection configuration
++    broker_connection_retry_on_startup=True,
++)
++
++
++@celery_app.task
++def example_task(x: int, y: int) -> int:
++    """
++    Example task for testing Celery configuration.
++
++    This task demonstrates a simple async operation that can be queued
++    and executed by Celery workers.
++
++    Args:
++        x: First integer operand
++        y: Second integer operand
++
++    Returns:
++        The sum of x and y
++    """
++    return x + y

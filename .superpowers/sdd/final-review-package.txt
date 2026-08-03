@@ -1,0 +1,548 @@
+ .env.template                                      |   18 +
+ .../sdd/2026-08-03-ece-scalability-plan-ledger.md  |   50 +
+ ...026-08-03-ece-scalability-plan-task-5-report.md |  278 +++
+ ...026-08-03-ece-scalability-plan-task-6-report.md |  312 ++++
+ ...026-08-03-ece-scalability-plan-task-7-report.md |  126 ++
+ Dockerfile                                         |   22 +
+ Dockerfile.backend                                 |   22 +
+ Dockerfile.worker                                  |   19 +
+ README.md                                          |  324 +---
+ backend/__init__.py                                |    0
+ backend/api/__init__.py                            |    1 +
+ backend/api/jobs.py                                |  244 +++
+ backend/api/predict.py                             |  280 +++
+ backend/api/simulate.py                            |  268 +++
+ backend/config.py                                  |   46 +
+ backend/db/__init__.py                             |    1 +
+ backend/db/jobs.py                                 |  311 ++++
+ backend/main.py                                    |   54 +
+ backend/models.py                                  |   64 +
+ backend/queue.py                                   |   56 +
+ dashboard/__version__.py                           |    5 +
+ docker-compose.yml                                 |   87 +-
+ .../plans/2026-08-03-ece-scalability-plan.md       | 1797 ++++++++++++++++++++
+ .../specs/2026-08-03-ece-scalability-design.md     |  400 +++++
+ migrations/add_jobs_table.py                       |  220 +++
+ requirements.txt                                   |   10 +
+ tests/test_jobs_endpoints.py                       |  212 +++
+ 27 files changed, 4925 insertions(+), 302 deletions(-)
+--- COMMIT LOG ---
+e92554d feat: implement Docker Compose setup for local development (Task 7)
+f5f5fe0 docs: append Task 6 post-review fix report
+976d0ef fix: correct result_url path prefix to /api/v1
+1481a7e feat: implement Task 6 - job status, cancel, and results endpoints
+d2bc4a8 docs: add Task 5 completion report and update ledger
+8209e2f feat: implement POST /simulate endpoint for EnergyPlus simulations
+90b2fce fix: align Task 4 request/response models with spec
+fce3e43 feat: implement POST /predict endpoint with Celery async task (Task 4)
+9921c64 feat: Add jobs table migration for async job execution tracking
+c7a9ae6 feat: Add Redis and Celery configuration for async job processing
+f348b3c feat: scaffold FastAPI backend with configuration and models
+c7cf7b0 docs: add comprehensive implementation plan for ECE scalability refactor
+15309ba docs: Add ECE scalability redesign specification
+25a6867 Merge branch 'v0.0.9-docs-update' into 'v0.0.9-final-alpha'
+92e1165 docs: Reference to EnergyPlus installation path configuration.
+cde618a docs: Updated docs to clarify instructions for installation.
+
+--- FULL DIFF (SUMMARY) ---
+diff --git a/.env.template b/.env.template
+new file mode 100644
+index 0000000..a840d64
+--- /dev/null
++++ b/.env.template
+@@ -0,0 +1,18 @@
++# .env.template - Template for environment variables
++# Copy this to .env and configure with your values
++
++# PostgreSQL Database Configuration
++POSTGRES_USER=ect_admin
++POSTGRES_PASSWORD=ect_pwd
++POSTGRES_DB=ect_db
++POSTGRES_HOST=localhost
++POSTGRES_PORT=5442
++
++# Data Storage
++ECT_DATA_DIR=./model_store
++
++# Redis Configuration
++REDIS_URL=redis://localhost:6379/0
++
++# FastAPI Configuration
++FASTAPI_URL=http://localhost:8000
+diff --git a/.superpowers/sdd/2026-08-03-ece-scalability-plan-ledger.md b/.superpowers/sdd/2026-08-03-ece-scalability-plan-ledger.md
+new file mode 100644
+index 0000000..20489a1
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-03-ece-scalability-plan-ledger.md
+@@ -0,0 +1,50 @@
++# SDD ledger — plan: docs/superpowers/plans/2026-08-03-ece-scalability-plan.md
++
++## Task Todos
++
++- [x] Task 1: FastAPI application structure
++- [x] Task 2: Redis and Celery configuration
++- [x] Task 3: Database migration for jobs table
++- [x] Task 4: Implement /predict endpoint
++- [x] Task 5: Implement /simulate endpoint
++- [ ] Task 6: Job status endpoints (/status, /cancel, /results)
++- [ ] Task 7: Docker Compose for local development
++- [ ] Task 8: Refactor dashboard/app.py to call FastAPI
++- [ ] Task 9: Write API unit tests
++- [ ] Task 10: Write integration tests
++- [ ] Task 11: Load test with 6+ concurrent users
++- [ ] Task 12: Update documentation
++- [ ] Task 13: Final verification and release
++
++
++## Execution Log
++
++**Task 1: complete (commits c7cf7b0..f348b3c, review clean)**
++- Spec ✅ | Quality Approved
++- All 4 files created, all 6 Pydantic models correct, exact versions in requirements.txt
++- CORS middleware with allow_origins=["*"], /health endpoint present, 4/4 imports passing
++
++
++**Task 2: complete (commits f348b3c..c7a9ae6, review clean)**
++- Spec ✅ | Quality Approved
++- .env.template updated, backend/queue.py created, Celery config complete, all 9 settings correct
++
++
++**Task 3: complete (commits c7a9ae6..9921c64, review clean)**
++- Spec ✅ | Quality ✅ | READY FOR DEPLOYMENT
++- All 11 columns present with correct types, 3 indexes created, migration function robust
++
++
++**Task 4: fix round 1/5 (3 addressed, 0 open; commits 9921c64..90b2fce)**
++**Task 4: complete (commits 9921c64..90b2fce, review clean)**
++- Spec ✅ | Quality ✅ (after fixes)
++- PredictRequest, JobSubmissionResponse, predict_task signature all corrected to match spec
++
++
++**Task 5: complete (commit 8209e2f, review clean)**
++- Spec ✅ | Quality Approved
++- SimulateRequest model updated, backend/api/simulate.py created (262 lines)
++- Endpoint accepts building_id, ifc_file_id, weather_data_id, parameters
++- Celery task priority 3, timeout 7200s, max_retries 3
++- Router registered in backend/main.py
++
+diff --git a/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-5-report.md b/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-5-report.md
+new file mode 100644
+index 0000000..75e01af
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-5-report.md
+@@ -0,0 +1,278 @@
++# Task 5 Implementation Report: POST /simulate Endpoint with Celery Async EnergyPlus Simulations
++
++**Date:** August 3, 2026  
++**Task:** Implement Task 5 of ECE Scalability Plan  
++**Status:** COMPLETED
++
++## Overview
++
++Task 5 implements the simulation API endpoint that users will call to submit EnergyPlus simulations. The endpoint accepts simulation requests, queues them to Celery, and returns a job_id for asynchronous processing. This follows the same pattern established by Task 4 (/predict endpoint) but with simulation-specific configuration.
++
++## Files Created
++
++### 1. `backend/api/simulate.py` (262 lines)
++Simulation endpoint and Celery task implementation.
++
++**Endpoint: POST /simulate**
++- Path: `/api/v1/simulate`
++- Status Code: 202 Accepted (async operation)
++- Tags: ["simulate"]
++
++**Request Model: SimulateRequest**
++- building_id (str, required): Identifier for the building
++- ifc_file_id (str, required): Identifier for the IFC file
++- weather_data_id (str, required): Identifier for the weather data
++- parameters (dict, optional): Simulation parameters
++
++**Response Model: JobSubmissionResponse**
++- job_id (str): Unique job identifier
++- status (JobStatus): Initial status ("pending")
++- estimated_wait_time_seconds (int): Estimated wait time
++
++**Endpoint Logic:**
++1. Validate input:
++   - Ensures building_id is provided
++   - Ensures ifc_file_id is provided
++   - Ensures weather_data_id is provided
++   - Parameters is optional (defaults to empty dict)
++2. Create job record in DB:
++   - Calls `create_job(job_type="eplus_simulate", input_params={...})`
++   - Returns job_id
++3. Queue to Celery:
++   - Uses `apply_async` with task_id=job_id
++   - Priority: 3 (lower than predictions at 5)
++   - Timeout: 7200 seconds (2 hours)
++4. Return JobSubmissionResponse immediately (no blocking)
++
++**Error Handling:**
++- HTTP 400: Missing required building_id, ifc_file_id, or weather_data_id
++- HTTP 422: Request validation failure
++- HTTP 500: Database or Celery queue failure
++- Updates job status to "failed" on queue error
++
++**Celery Task: simulate_task**
++- Name: "simulate_task"
++- Configuration:
++  - bind=True (for retry capability)
++  - max_retries=3
++  - time_limit=7200 seconds (2 hours)
++  - acks_late=True
++  - Exponential backoff on retry
++
++**Task Parameters:**
++- self: Celery task context
++- job_id: Unique job identifier
++- building_id: Building identifier for simulation
++- ifc_file_id: IFC file identifier
++- weather_data_id: Weather data identifier
++- parameters: Simulation parameters dictionary
++
++**Task Logic:**
++1. Update job status to "running" (progress 10%)
++2. Call EnergyPlus simulation pipeline (currently mocked, TODO: integrate ece.pipeline_eplus.simulate)
++3. Update progress to 50%
++4. Store results in database via `store_result()`
++5. Update job status to "completed" (progress 100%)
++6. On error:
++   - Log error with full context
++   - Update job status to "failed" with error_message
++   - Retry with exponential backoff (max 3 times)
++   - On max retries exceeded: final failure state
++
++**Return Value:**
++```json
++{
++  "job_id": "uuid-string",
++  "status": "completed",
++  "results": {
++    "building_id": "building_001",
++    "ifc_file_id": "ifc_001",
++    "weather_data_id": "weather_001",
++    "parameters": {...},
++    "simulation_output": {...},
++    "timestamp": "2026-08-03T..."
++  }
++}
++```
++
++## Files Modified
++
++### 1. `backend/models.py`
++Updated SimulateRequest model to match task requirements:
++
++**Before:**
++```python
++class SimulateRequest(BaseModel):
++    space_id: str
++    parameters: Dict[str, Any]
++    duration: int
++    model_version: Optional[str]
++```
++
++**After:**
++```python
++class SimulateRequest(BaseModel):
++    building_id: str
++    ifc_file_id: str
++    weather_data_id: str
++    parameters: Optional[Dict[str, Any]]
++```
++
++### 2. `backend/main.py`
++Added import and router registration for simulate endpoint:
++
++**Changes:**
++- Added import: `from backend.api import simulate`
++- Added router: `app.include_router(simulate.router, prefix="/api/v1", tags=["simulate"])`
++- Enabled POST /simulate endpoint on FastAPI app
++
++## Configuration
++
++### Priority & Timeout
++- **Priority:** 3 (lower than predictions at 5)
++  - Simulations are more resource-intensive and longer-running
++  - Lower priority allows predictions to be prioritized
++- **Timeout:** 7200 seconds (2 hours)
++  - Simulations can take significant time
++  - Provides sufficient time for complete simulation runs
++- **Max Retries:** 3
++  - Balances reliability against cascading failures
++  - Exponential backoff: min(2^retry_count, 300) seconds
++
++### Estimated Wait Time
++- Currently hardcoded to 300 seconds (5 minutes) in response
++- TODO: Calculate based on queue depth and estimated simulation duration
++
++## Integration Requirements
++
++**Depends on (already completed in Tasks 1-4):**
++- ✓ Task 1: FastAPI backend setup (`backend/main.py`, `backend/config.py`)
++- ✓ Task 2: Celery configuration (`backend/queue.py`)
++- ✓ Task 3: Database setup (`db/models.py`, `db/session.py`, jobs migration)
++- ✓ Task 4: Prediction endpoint (`backend/api/predict.py`)
++- ✓ Pydantic models (`backend/models.py`): SimulateRequest, JobSubmissionResponse, JobStatus
++
++**Database Support:**
++- Uses existing Job ORM model from Task 3
++- job_type field supports "eplus_simulate" value
++- input_params and result_data fields store simulation data
++
++## Implementation Notes
++
++### Design Decisions
++
++1. **Async Processing Pattern:**
++   - Endpoint returns immediately with job_id
++   - Client polls GET /jobs/{job_id} to check status
++   - No blocking on the endpoint
++   - Matches Task 4 pattern for consistency
++
++2. **Priority Hierarchy:**
++   - Predictions: Priority 5 (shorter, user-facing)
++   - Simulations: Priority 3 (longer, background work)
++   - Allows predictions to take precedence when both are queued
++
++3. **Long Timeout:**
++   - 7200 seconds (2 hours) provides ample time
++   - Typical EnergyPlus simulations for full-year runs
++   - Prevents premature task timeout
++
++4. **Optional Parameters:**
++   - Simulations can proceed with default parameters
++   - Allows flexible simulation configuration
++   - Empty dict used when parameters not provided
++
++5. **Consistent Error Handling:**
++   - Follows same pattern as Task 4
++   - Comprehensive validation at endpoint
++   - Job status marked as "failed" on any error
++   - Celery task retries with exponential backoff
++   - Error messages stored for debugging
++
++### Code Quality
++
++- **Logging:** All major operations logged with job_id context
++- **Type Hints:** Full type hints for maintainability
++- **Documentation:** Comprehensive docstrings
++- **Error Handling:** Try-catch blocks with proper cleanup
++- **Comments:** Inline TODOs marking integration points
++
++### Future Enhancements (TODOs)
++
++1. **EnergyPlus Pipeline Integration:**
++   - Currently using mock simulation output
++   - TODO: Replace with `from ece.pipeline_eplus import simulate` when available
++   - Will call: `simulate(building_id=building_id, ifc_file_id=ifc_file_id, weather_data_id=weather_data_id, parameters=parameters)`
++
++2. **User Tracking:**
++   - Currently user_id=None in create_job
++   - TODO: Extract from authentication context when auth implemented
++
++3. **Estimated Wait Time:**
++   - Currently hardcoded to 300 seconds
++   - TODO: Calculate based on:
++     - Queue depth: `len(get_jobs_by_status("queued"))`
++     - Average simulation duration
++     - Celery worker availability
++
++4. **Progress Updates:**
++   - Currently progress at 10% (start) and 50% (before store)
++   - TODO: Add intermediate progress updates during long simulations
++   - Could update every 10% of expected runtime
++
++5. **Simulation Validation:**
++   - TODO: Validate IFC file and weather data exist before queuing
++   - TODO: Add simulation parameter validation
++
++6. **Monitoring & Metrics:**
++   - TODO: Add Prometheus metrics for:
++     - Simulation task duration
++     - Success/failure rates
++     - Queue depth
++     - Task retry counts
++     - IFC file handling performance
++
++## Verification Checklist
++
++- [x] Created backend/api/simulate.py with endpoint and Celery task
++- [x] Updated SimulateRequest model in backend/models.py
++- [x] Endpoint accepts SimulateRequest with validation
++- [x] Endpoint returns JobSubmissionResponse with job_id
++- [x] Endpoint returns 202 Accepted status
++- [x] Job record created in database with job_type="eplus_simulate"
++- [x] Task queued to Celery with task_id=job_id
++- [x] Priority set to 3 (lower than predictions)
++- [x] Timeout set to 7200 seconds
++- [x] Max retries set to 3
++- [x] Celery task updates job status through lifecycle
++- [x] Error handling with status updates
++- [x] Retry logic with exponential backoff
++- [x] Router registered in backend/main.py
++- [x] Code is syntactically valid Python
++- [x] Follows same pattern as Task 4 for consistency
++
++## Files Summary
++
++### Created
++- `backend/api/simulate.py` — 262 lines, endpoint + Celery task
++
++### Modified
++- `backend/models.py` — Updated SimulateRequest model (5 fields changed)
++- `backend/main.py` — Added simulate router import and registration (2 lines)
++
++### Test Files Created (not part of submission)
++- `test_simulate_endpoint.py` — Integration tests for the endpoint
++
++## Deployment Status
++
++✓ Task 5 is complete and ready for integration
++✓ Code follows established patterns from Task 4
++✓ All required configurations applied
++✓ Ready for integration with Tasks 6+ (status/results endpoints)
++
++## Next Steps
++
++1. Task 6: Implement GET /jobs/{job_id} and GET /jobs/{job_id}/results endpoints
++2. Task 7: Implement job cancellation and cleanup
++3. Task 8: Add monitoring and metrics collection
++4. Integration: Connect to actual EnergyPlus pipeline when available
+diff --git a/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-6-report.md b/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-6-report.md
+new file mode 100644
+index 0000000..9c0f4e2
+--- /dev/null
++++ b/.superpowers/sdd/2026-08-03-ece-scalability-plan-task-6-report.md
+@@ -0,0 +1,312 @@
++# Task 6 Implementation Report: Job Status, Cancel, and Results Endpoints
++
++**Date:** 2026-08-03  
++**Task:** Implement three endpoints for job lifecycle management  
++**Status:** COMPLETED
++
++## Overview
++
++Task 6 implements job lifecycle management endpoints as specified in the ECE Scalability Plan. These endpoints enable users to check job progress, cancel running jobs, and retrieve job results.
++
++## Requirements Met
++
++All requirements from the task specification have been implemented:
++
++### Endpoint 1: GET /status/{job_id}
++- **Path:** `/api/v1/status/{job_id}`
++- **Status Code:** 200 OK
++- **Input:** job_id (URL path parameter)
++- **Output:** JobStatusResponse with:
++  - job_id
++  - status (queued, running, completed, failed, cancelled)
++  - progress (0-100 percentage)
++  - error_message (nullable, populated on failure)
++  - created_at (job creation timestamp)
++  - started_at (nullable, set when job starts)
++  - completed_at (nullable, set on completion)
++  - result_url (included if status is "completed", points to `/api/results/{job_id}`)
++- **Error Handling:** Returns 404 if job not found
++
++### Endpoint 2: DELETE /cancel/{job_id}
++- **Path:** `/api/v1/cancel/{job_id}`
++- **Status Code:** 200 OK on success
++- **Input:** job_id (URL path parameter)
++- **Logic:**
++  1. Fetch job from database
++  2. Check if status is "queued" or "running"
++  3. Revoke Celery task: `celery_app.control.revoke(job_id, terminate=True)`
++  4. Update job status to "cancelled" in database
++- **Output:** `{"message": "Job {job_id} cancelled"}`
++- **Error Handling:**
++  - 404 if job not found
++  - 400 if status is not queued/running (e.g., cannot cancel completed job)
++
++### Endpoint 3: GET /results/{job_id}
++- **Path:** `/api/v1/results/{job_id}`
++- **Status Code:** 200 OK
++- **Input:** job_id (URL path parameter)
++- **Precondition:** Job must have status "completed"
++- **Output:** JobResultsResponse with:
++  - job_id
++  - status (always "completed" for this endpoint)
++  - data (job result data from database)
++  - created_at (job creation timestamp)
++  - completed_at (job completion timestamp)
++- **Error Handling:**
++  - 404 if job not found
++  - 400 if job status is not "completed"
++
++## Files Created
++
++### backend/api/jobs.py (New)
++- Created comprehensive job lifecycle management router
++- Implements three endpoints with full error handling
++- Uses database layer (`backend.db.jobs`) for job queries
++- Uses Celery app for task revocation
++- Comprehensive logging for debugging
++
++### tests/test_jobs_endpoints.py (New)
++- Unit tests for all three endpoints using FastAPI TestClient
++- Tests for success cases (queued, running, completed jobs)
++- Tests for error cases (job not found, invalid status transitions)
++- Uses mocking to isolate endpoint logic from database/Celery
++- Test coverage for all HTTP status codes (200, 400, 404)
++
++## Files Modified
++
++### backend/main.py
++- Added import: `from backend.api import jobs`
++- Registered jobs router: `app.include_router(jobs.router, prefix="/api/v1", tags=["jobs"])`
++
++### backend/models.py
++- Updated `JobStatusResponse`:
++  - Added `error_message: Optional[str]`
++  - Added `started_at: Optional[datetime]`
++  - Added `completed_at: Optional[datetime]`
++  - Added `result_url: Optional[str]` (populated if job completed)
++  - Removed `updated_at` field
++- Updated `JobResultsResponse`:
++  - Renamed `results` field to `data`
++  - Removed `error_message` field (status indicates errors)
++- Updated `JobStatus` enum:
++  - Changed `PENDING = "pending"` to `QUEUED = "queued"` (matches database schema)
++  - Added `CANCELLED = "cancelled"`
++  - Removed `PENDING` (no longer used)
++
++### backend/api/predict.py
++- Updated job submission response: `JobStatus.PENDING` → `JobStatus.QUEUED`
++- Ensures consistency with database status values
++
++### backend/api/simulate.py
++- Updated job submission response: `JobStatus.PENDING` → `JobStatus.QUEUED`
++- Ensures consistency with database status values
++
++## Implementation Details
++
++### Architecture
++- RESTful design following HTTP standards:
++  - GET for retrieving state
++  - DELETE for cancellation operations
++  - Appropriate HTTP status codes (200, 400, 404, 500)
++- Minimal blocking operations (all queries are fast)
++- Proper error propagation and logging
++
++### Database Integration
++- Uses `backend.db.jobs.get_job()` for job lookups
++- Uses `backend.db.jobs.update_job_status()` for status updates
++- Timestamps managed by database layer
++
++### Celery Integration
++- Uses `celery_app.control.revoke(job_id, terminate=True)` for task cancellation
++- Gracefully handles revocation failures (still updates DB status)
++
++### Error Handling
++- 404 responses for missing jobs
++- 400 responses for invalid state transitions
++- 500 responses for unexpected errors
++- All errors logged with context
++
++### Response Models
++- All responses use Pydantic models for validation
+... (full diff available via git)

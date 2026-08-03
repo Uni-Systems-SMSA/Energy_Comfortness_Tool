@@ -1,0 +1,724 @@
+ backend/api/__init__.py |   1 +
+ backend/api/predict.py  | 280 +++++++++++++++++++++++++++++++++++++++++++
+ backend/db/__init__.py  |   1 +
+ backend/db/jobs.py      | 311 ++++++++++++++++++++++++++++++++++++++++++++++++
+ backend/main.py         |   9 +-
+ backend/models.py       |  13 +-
+ 6 files changed, 606 insertions(+), 9 deletions(-)
+--- COMMIT LOG ---
+90b2fce fix: align Task 4 request/response models with spec
+fce3e43 feat: implement POST /predict endpoint with Celery async task (Task 4)
+
+--- FULL DIFF ---
+diff --git a/backend/api/__init__.py b/backend/api/__init__.py
+new file mode 100644
+index 0000000..3cef6f0
+--- /dev/null
++++ b/backend/api/__init__.py
+@@ -0,0 +1 @@
++"""API routers for backend."""
+diff --git a/backend/api/predict.py b/backend/api/predict.py
+new file mode 100644
+index 0000000..bd0f794
+--- /dev/null
++++ b/backend/api/predict.py
+@@ -0,0 +1,280 @@
++"""
++Prediction endpoint and Celery task for async ML predictions.
++
++This module provides the POST /predict endpoint that accepts prediction requests,
++queues them to Celery, and returns a job_id for async processing.
++"""
++
++import logging
++from typing import Optional
++from datetime import datetime
++
++from fastapi import APIRouter, HTTPException, status
++from pydantic import ValidationError
++
++from backend.models import PredictRequest, JobSubmissionResponse, JobStatus
++from backend.queue import celery_app
++from backend.config import settings
++from backend.db.jobs import create_job, update_job_status, store_result
++
++logger = logging.getLogger(__name__)
++
++# Create router for prediction endpoints
++router = APIRouter()
++
++# Configuration
++PREDICT_TASK_PRIORITY = 5  # Medium priority
++PREDICT_TASK_TIMEOUT = 3600  # 1 hour in seconds
++PREDICT_TASK_MAX_RETRIES = 3
++
++
++@router.post(
++    "/predict",
++    response_model=JobSubmissionResponse,
++    status_code=status.HTTP_202_ACCEPTED,
++    tags=["predict"],
++    summary="Submit a prediction job",
++    description="Submit a prediction request for async processing"
++)
++async def submit_prediction(request: PredictRequest) -> JobSubmissionResponse:
++    """
++    Submit a prediction job.
++
++    This endpoint accepts a prediction request, validates the input,
++    creates a job record in the database, and queues it to Celery.
++
++    Args:
++        request: PredictRequest with building_id, space_id, date_range, and model_type
++
++    Returns:
++        JobSubmissionResponse with job_id, status, and estimated_wait_time_seconds
++
++    Raises:
++        HTTPException: If validation fails or job creation fails
++    """
++    try:
++        logger.info(f"Received prediction request for building {request.building_id}, space {request.space_id}")
++
++        # Validate input
++        if not request.building_id:
++            raise HTTPException(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                detail="building_id is required"
++            )
++
++        if not request.space_id:
++            raise HTTPException(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                detail="space_id is required"
++            )
++
++        if not request.date_range or not isinstance(request.date_range, dict):
++            raise HTTPException(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                detail="date_range is required and must be a dictionary"
++            )
++
++        if "start" not in request.date_range or "end" not in request.date_range:
++            raise HTTPException(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                detail="date_range must contain 'start' and 'end' keys"
++            )
++
++        if not request.model_type:
++            raise HTTPException(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                detail="model_type is required"
++            )
++
++        # Prepare input parameters for database
++        input_params = {
++            "building_id": request.building_id,
++            "space_id": request.space_id,
++            "date_range": request.date_range,
++            "model_type": request.model_type,
++        }
++
++        # Create job record in database
++        try:
++            job_id = create_job(
++                job_type="ml_predict",
++                input_params=input_params,
++                user_id=None,  # TODO: Add user tracking when auth is implemented
++            )
++            logger.info(f"Created job {job_id} in database")
++        except Exception as e:
++            logger.error(f"Failed to create job in database: {e}")
++            raise HTTPException(
++                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++                detail="Failed to create job record"
++            )
++
++        # Queue task to Celery
++        try:
++            task = predict_task.apply_async(
++                args=[job_id, request.building_id, request.space_id, request.date_range, request.model_type],
++                task_id=job_id,
++                priority=PREDICT_TASK_PRIORITY,
++                timeout=PREDICT_TASK_TIMEOUT,
++            )
++            logger.info(f"Queued prediction task {job_id} to Celery")
++        except Exception as e:
++            logger.error(f"Failed to queue task to Celery: {e}")
++            # Update job status to failed
++            update_job_status(
++                job_id=job_id,
++                status="failed",
++                error_message=f"Failed to queue task: {str(e)}"
++            )
++            raise HTTPException(
++                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++                detail="Failed to queue prediction task"
++            )
++
++        # Calculate estimated wait time (mock calculation)
++        estimated_wait_time_seconds = 30  # TODO: Implement queue depth calculation
++
++        return JobSubmissionResponse(
++            job_id=job_id,
++            status=JobStatus.PENDING,
++            estimated_wait_time_seconds=estimated_wait_time_seconds
++        )
++
++    except ValidationError as e:
++        logger.error(f"Request validation failed: {e}")
++        raise HTTPException(
++            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
++            detail=f"Request validation failed: {str(e)}"
++        )
++    except HTTPException:
++        raise
++    except Exception as e:
++        logger.error(f"Unexpected error in submit_prediction: {e}", exc_info=True)
++        raise HTTPException(
++            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
++            detail="An unexpected error occurred"
++        )
++
++
++@celery_app.task(
++    name="predict_task",
++    bind=True,
++    max_retries=PREDICT_TASK_MAX_RETRIES,
++    time_limit=PREDICT_TASK_TIMEOUT,
++    acks_late=True,
++)
++def predict_task(
++    self,
++    job_id: str,
++    building_id: str,
++    space_id: str,
++    date_range: dict,
++    model_type: str
++) -> dict:
++    """
++    Celery task for async ML prediction.
++
++    This task handles the actual prediction logic:
++    1. Update job status to "running"
++    2. Call ECE pipeline to get predictions
++    3. Store results in database
++    4. Update job status to "completed"
++    5. Handle errors and retry
++
++    Args:
++        self: Celery task context (for retry)
++        job_id: Unique job identifier
++        building_id: Building identifier for prediction
++        space_id: Space identifier for prediction
++        date_range: Date range dictionary with 'start' and 'end' keys
++        model_type: Type of model to use for prediction
++
++    Returns:
++        Dictionary with prediction results
++
++    Raises:
++        Exception: If prediction fails (will trigger retry)
++    """
++    try:
++        logger.info(f"Starting prediction task {job_id} for building {building_id}, space {space_id}, model {model_type}")
++
++        # Update job status to "running"
++        update_job_status(
++            job_id=job_id,
++            status="running",
++            progress=10
++        )
++
++        # TODO: Call ECE pipeline to get predictions
++        # When ece.pipeline_ml module is available, uncomment:
++        # from ece.pipeline_ml import predict
++        # predictions = predict(
++        #     building_id=building_id,
++        #     space_id=space_id,
++        #     date_range=date_range,
++        #     model_type=model_type
++        # )
++
++        # For now, mock prediction results
++        logger.info(f"Calling ECE pipeline for predictions (currently mocked) for {building_id}/{space_id}")
++        predictions = {
++            "building_id": building_id,
++            "space_id": space_id,
++            "date_range": date_range,
++            "model_type": model_type,
++            "predictions": {"status": "mocked"},  # Mock: placeholder predictions
++            "timestamp": datetime.utcnow().isoformat(),
++        }
++
++        # Update progress
++        update_job_status(
++            job_id=job_id,
++            status="running",
++            progress=50
++        )
++
++        # Store results in database
++        success = store_result(
++            job_id=job_id,
++            result_data=predictions
++        )
++
++        if not success:
++            logger.error(f"Failed to store results for job {job_id}")
++            raise Exception("Failed to store results in database")
++
++        # Update job status to "completed"
++        update_job_status(
++            job_id=job_id,
++            status="completed",
++            progress=100
++        )
++
++        logger.info(f"Completed prediction task {job_id}")
++        return {
++            "job_id": job_id,
++            "status": "completed",
++            "results": predictions
++        }
++
++    except Exception as e:
++        logger.error(f"Error in predict_task {job_id}: {e}", exc_info=True)
++
++        # Update job status to "failed"
++        update_job_status(
++            job_id=job_id,
++            status="failed",
++            error_message=str(e)
++        )
++
++        # Retry with exponential backoff
++        try:
++            raise self.retry(exc=e, countdown=min(2 ** self.request.retries, 300))
++        except self.MaxRetriesExceededError:
++            logger.error(f"Max retries exceeded for job {job_id}")
++            # Final failure - already marked as failed above
++            return {
++                "job_id": job_id,
++                "status": "failed",
++                "error": str(e)
++            }
+diff --git a/backend/db/__init__.py b/backend/db/__init__.py
+new file mode 100644
+index 0000000..e6bee75
+--- /dev/null
++++ b/backend/db/__init__.py
+@@ -0,0 +1 @@
++"""Database module for backend."""
+diff --git a/backend/db/jobs.py b/backend/db/jobs.py
+new file mode 100644
+index 0000000..f57b173
+--- /dev/null
++++ b/backend/db/jobs.py
+@@ -0,0 +1,311 @@
++"""
++Database operations for job tracking and management.
++
++This module provides CRUD operations for async jobs, handling creation,
++status updates, result storage, and job retrieval.
++"""
++
++import uuid
++import logging
++from datetime import datetime
++from typing import Optional, Dict, Any, List
++from sqlalchemy import create_engine, Column, String, Integer, DateTime, JSON, Text, Index
++from sqlalchemy.orm import sessionmaker, Session
++from sqlalchemy.ext.declarative import declarative_base
++from db.session import SessionLocal, engine
++
++logger = logging.getLogger(__name__)
++
++# Use the existing Base from db.models
++from db.models import Base
++
++
++class Job(Base):
++    """ORM model for tracking async job execution."""
++
++    __tablename__ = "jobs"
++
++    # Primary key: job_id (String(50))
++    id = Column(String(50), primary_key=True, nullable=False)
++
++    # User tracking (nullable)
++    user_id = Column(String(50), nullable=True)
++
++    # Job status (default: "queued")
++    # Valid values: queued, running, completed, failed, cancelled
++    status = Column(String(20), nullable=False, default="queued")
++
++    # Job type (required)
++    # Valid values: "ml_predict", "eplus_simulate", "weather_process"
++    job_type = Column(String(50), nullable=False)
++
++    # Input parameters (JSON)
++    input_params = Column(JSON, nullable=False)
++
++    # Results when completed (nullable JSON)
++    result_data = Column(JSON, nullable=True)
++
++    # Progress tracking (0-100, default 0)
++    progress = Column(Integer, nullable=False, default=0)
++
++    # Error message (nullable Text)
++    error_message = Column(Text, nullable=True)
++
++    # Timestamps
++    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
++    started_at = Column(DateTime, nullable=True)
++    completed_at = Column(DateTime, nullable=True)
++
++    __table_args__ = (
++        # Indexes for common queries
++        Index("ix_jobs_status", "status"),
++        Index("ix_jobs_user_id", "user_id"),
++        Index("ix_jobs_created_at", "created_at"),
++    )
++
++
++def create_job(
++    job_type: str,
++    input_params: Dict[str, Any],
++    user_id: Optional[str] = None,
++    session: Optional[Session] = None
++) -> str:
++    """
++    Create a new job record in the database.
++
++    Args:
++        job_type: Type of job (e.g., "ml_predict", "eplus_simulate")
++        input_params: Input parameters as dictionary
++        user_id: Optional user identifier
++        session: Optional database session (creates new if not provided)
++
++    Returns:
++        job_id: Unique job identifier
++
++    Raises:
++        Exception: If job creation fails
++    """
++    try:
++        if session is None:
++            session = SessionLocal()
++            should_close = True
++        else:
++            should_close = False
++
++        # Generate unique job_id
++        job_id = str(uuid.uuid4())[:50]
++
++        # Create job record
++        job = Job(
++            id=job_id,
++            user_id=user_id,
++            status="queued",
++            job_type=job_type,
++            input_params=input_params,
++            progress=0,
++            created_at=datetime.utcnow(),
++        )
++
++        session.add(job)
++        session.commit()
++
++        logger.info(f"Created job {job_id} with type {job_type}")
++        return job_id
++
++    except Exception as e:
++        logger.error(f"Error creating job: {e}")
++        session.rollback()
++        raise
++
++    finally:
++        if should_close:
++            session.close()
++
++
++def get_job(job_id: str, session: Optional[Session] = None) -> Optional[Job]:
++    """
++    Retrieve a job record by ID.
++
++    Args:
++        job_id: Job identifier
++        session: Optional database session (creates new if not provided)
++
++    Returns:
++        Job record or None if not found
++    """
++    try:
++        if session is None:
++            session = SessionLocal()
++            should_close = True
++        else:
++            should_close = False
++
++        job = session.query(Job).filter(Job.id == job_id).first()
++        return job
++
++    finally:
++        if should_close:
++            session.close()
++
++
++def update_job_status(
++    job_id: str,
++    status: str,
++    progress: Optional[int] = None,
++    error_message: Optional[str] = None,
++    session: Optional[Session] = None
++) -> bool:
++    """
++    Update job status and optional progress/error.
++
++    Args:
++        job_id: Job identifier
++        status: New status (queued, running, completed, failed, cancelled)
++        progress: Optional progress percentage (0-100)
++        error_message: Optional error message
++        session: Optional database session (creates new if not provided)
++
++    Returns:
++        True if successful, False otherwise
++    """
++    try:
++        if session is None:
++            session = SessionLocal()
++            should_close = True
++        else:
++            should_close = False
++
++        job = session.query(Job).filter(Job.id == job_id).first()
++        if not job:
++            logger.warning(f"Job {job_id} not found")
++            return False
++
++        job.status = status
++        if progress is not None:
++            job.progress = progress
++        if error_message is not None:
++            job.error_message = error_message
++
++        if status == "running" and job.started_at is None:
++            job.started_at = datetime.utcnow()
++        elif status in ("completed", "failed", "cancelled") and job.completed_at is None:
++            job.completed_at = datetime.utcnow()
++
++        session.commit()
++        logger.info(f"Updated job {job_id} status to {status}")
++        return True
++
++    except Exception as e:
++        logger.error(f"Error updating job {job_id}: {e}")
++        session.rollback()
++        return False
++
++    finally:
++        if should_close:
++            session.close()
++
++
++def store_result(
++    job_id: str,
++    result_data: Dict[str, Any],
++    session: Optional[Session] = None
++) -> bool:
++    """
++    Store result data for a completed job.
++
++    Args:
++        job_id: Job identifier
++        result_data: Result data as dictionary
++        session: Optional database session (creates new if not provided)
++
++    Returns:
++        True if successful, False otherwise
++    """
++    try:
++        if session is None:
++            session = SessionLocal()
++            should_close = True
++        else:
++            should_close = False
++
++        job = session.query(Job).filter(Job.id == job_id).first()
++        if not job:
++            logger.warning(f"Job {job_id} not found")
++            return False
++
++        job.result_data = result_data
++        job.status = "completed"
++        job.completed_at = datetime.utcnow()
++        job.progress = 100
++
++        session.commit()
++        logger.info(f"Stored results for job {job_id}")
++        return True
++
++    except Exception as e:
++        logger.error(f"Error storing result for job {job_id}: {e}")
++        session.rollback()
++        return False
++
++    finally:
++        if should_close:
++            session.close()
++
++
++def get_jobs_by_status(
++    status: str,
++    limit: int = 100,
++    session: Optional[Session] = None
++) -> List[Job]:
++    """
++    Retrieve jobs by status.
++
++    Args:
++        status: Job status to filter by
++        limit: Maximum number of jobs to return
++        session: Optional database session (creates new if not provided)
++
++    Returns:
++        List of Job records
++    """
++    try:
++        if session is None:
++            session = SessionLocal()
++            should_close = True
++        else:
++            should_close = False
++
++        jobs = session.query(Job).filter(Job.status == status).limit(limit).all()
++        return jobs
++
++    finally:
++        if should_close:
++            session.close()
++
++
++def get_job_status(job_id: str, session: Optional[Session] = None) -> Optional[str]:
++    """
++    Get the status of a job.
++
++    Args:
++        job_id: Job identifier
++        session: Optional database session (creates new if not provided)
++
++    Returns:
++        Job status or None if not found
++    """
++    try:
++        if session is None:
++            session = SessionLocal()
++            should_close = True
++        else:
++            should_close = False
++
++        job = session.query(Job).filter(Job.id == job_id).first()
++        if job:
++            return job.status
++        return None
++
++    finally:
++        if should_close:
++            session.close()
+diff --git a/backend/main.py b/backend/main.py
+index a2970c3..aaac354 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -29,25 +29,24 @@ app.add_middleware(
+ 
+ @app.get("/health", tags=["health"])
+ async def health_check():
+     """Health check endpoint."""
+     return JSONResponse(
+         status_code=200,
+         content={"status": "healthy"}
+     )
+ 
+ 
+-# Placeholder routers (to be implemented in subsequent tasks)
+-# from backend.routers import predict_router, simulate_router, jobs_router
+-# app.include_router(predict_router.router, prefix="/api/v1/predict", tags=["predict"])
+-# app.include_router(simulate_router.router, prefix="/api/v1/simulate", tags=["simulate"])
+-# app.include_router(jobs_router.router, prefix="/api/v1/jobs", tags=["jobs"])
++# Include routers for various endpoints
++from backend.api import predict
++
++app.include_router(predict.router, prefix="/api/v1", tags=["predict"])
+ 
+ 
+ if __name__ == "__main__":
+     import uvicorn
+     uvicorn.run(
+         "backend.main:app",
+         host=settings.API_HOST,
+         port=settings.API_PORT,
+         reload=True
+     )
+diff --git a/backend/models.py b/backend/models.py
+index 69cbd35..bea827c 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -1,47 +1,52 @@
+ """
+ Pydantic models for request/response validation.
+ """
+ from enum import Enum
+ from typing import Optional, Any, Dict
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, ConfigDict
+ from datetime import datetime
+ 
+ 
+ class JobStatus(str, Enum):
+     """Job status enumeration."""
+     PENDING = "pending"
+     RUNNING = "running"
+     COMPLETED = "completed"
+     FAILED = "failed"
+ 
+ 
+ class PredictRequest(BaseModel):
+     """Request model for prediction jobs."""
++    model_config = ConfigDict(protected_namespaces=())
++
++    building_id: str = Field(..., description="Identifier for the building")
+     space_id: str = Field(..., description="Identifier for the space")
+-    features: Dict[str, Any] = Field(..., description="Feature dictionary for prediction")
+-    model_version: Optional[str] = Field(None, description="Model version to use")
++    date_range: Dict[str, str] = Field(..., description="Date range with 'start' and 'end' keys (ISO format)")
++    model_type: str = Field(..., description="Type of model to use for prediction")
+ 
+ 
+ class SimulateRequest(BaseModel):
+     """Request model for simulation jobs."""
++    model_config = ConfigDict(protected_namespaces=())
++
+     space_id: str = Field(..., description="Identifier for the space")
+     parameters: Dict[str, Any] = Field(..., description="Simulation parameters")
+     duration: int = Field(..., description="Simulation duration in minutes")
+     model_version: Optional[str] = Field(None, description="Model version to use")
+ 
+ 
+ class JobSubmissionResponse(BaseModel):
+     """Response model for job submission."""
+     job_id: str = Field(..., description="Unique job identifier")
+     status: JobStatus = Field(..., description="Initial job status")
+-    message: str = Field(..., description="Human-readable message")
++    estimated_wait_time_seconds: Optional[int] = Field(None, description="Estimated wait time in seconds for job completion")
+ 
+ 
+ class JobStatusResponse(BaseModel):
+     """Response model for job status query."""
+     job_id: str = Field(..., description="Unique job identifier")
+     status: JobStatus = Field(..., description="Current job status")
+     progress: int = Field(default=0, description="Progress percentage (0-100)")
+     created_at: datetime = Field(..., description="Job creation timestamp")
+     updated_at: datetime = Field(..., description="Last update timestamp")
+ 
