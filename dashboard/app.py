@@ -75,7 +75,8 @@ def _store_energy_simulation_results(simulation_results: dict, space_id: str,
         space_id: Space identifier that triggered the simulation
         ifc_file_path: Path to the IFC file used
         epw_file_path: Path to the EPW weather file used
-        
+
+           
     Returns:
         bool: True if storage was successful, False otherwise
     """
