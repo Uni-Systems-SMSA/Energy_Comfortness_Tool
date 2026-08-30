@@ -309,6 +309,13 @@ def _store_energy_simulation_results(
                     )
                     session.add(existing_space)
                     session.flush()
+                else:
+                    if building_id and existing_space.building_id != building_id:
+                        existing_space.building_id = building_id
+                    if space_record and space_record.latitude and space_record.longitude:
+                        existing_space.latitude = space_record.latitude
+                        existing_space.longitude = space_record.longitude
+                    session.flush()
 
                 energy_space = EnergySpace(
                     energy_building_id=energy_building.energy_building_id,

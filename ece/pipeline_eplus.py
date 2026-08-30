@@ -158,8 +158,8 @@ def run_energy_simulation(
         # Run the project with ConsoleDecisionHandler for interactive input
         print(f"[bim2sim] Running project with ConsoleDecisionHandler...")
         ret_val = run_project(project, ConsoleDecisionHandler())
-        if ret_val != 0:
-            raise RuntimeError("bim2sim execution finished but was not successful")
+        if ret_val is not None and ret_val != 0:
+            raise RuntimeError(f"bim2sim execution failed with return code {ret_val}")
         
         print(f"[bim2sim] ✅ Simulation completed successfully!")
         print(f"[bim2sim] Results saved to: {project_path}")
